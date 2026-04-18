@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Auth state (real session cookies)
+.auth/
+tests/.auth/
+
+# Playwright
+playwright-report/
+test-results/
+trace.zip
+
+# Manifest payloads (registry stays; raw extractions/plans/logs do not)
+manifest/extractions/
+manifest/plans/
+manifest/runs.log
+manifest/.cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

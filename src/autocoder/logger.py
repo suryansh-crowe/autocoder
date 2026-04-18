@@ -1,0 +1,189 @@
+"""Centralised structured logger.
+
+Two sinks:
+
+* **Console** (stderr, coloured) — for the human running the script.
+* **`manifest/runs.log`** (newline-delimited JSON) — for post-mortem
+  inspection. Every record carries ``ts``, ``level``, ``event``, plus
+  whatever ``key=value`` fields the caller supplied.
+
+Levels (lowest to highest):
+
+    debug → info / ok → warn → error
+
+Set the floor with the ``LOG_LEVEL`` env var (``debug``, ``info``,
+``warn``, ``error``). Default is ``info``. ``ok`` shares ``info``'s
+threshold and just renders green.
+
+Sensitive values rule
+---------------------
+
+Never pass credential **values** as log fields. Only pass:
+
+* the env var **name** (``username_env="LOGIN_USERNAME"``), or
+* a presence boolean (``username_present=True``).
+
+Use :func:`safe_url` to strip query strings + fragments from URLs
+before logging — they may contain bearer tokens or one-time codes.
+
+Use :func:`llm_call` whenever the LLM is invoked so token accounting
+stays uniform across stages.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+from pathlib import Path
+from typing import Any, TextIO
+from urllib.parse import urlsplit, urlunsplit
+
+from rich.console import Console
+
+
+_LEVELS: dict[str, int] = {"debug": 0, "info": 1, "ok": 1, "warn": 2, "error": 3}
+
+_console: Console | None = None
+_file_handle: TextIO | None = None
+_min_level: int = _LEVELS["info"]
+
+
+def init(log_path: Path | None = None, level: str | None = None) -> None:
+    """Configure the console + optional persistent log file.
+
+    Safe to call multiple times — later calls update the threshold and
+    re-open the file handle if needed.
+    """
+    global _console, _file_handle, _min_level
+    _console = Console(stderr=True, highlight=False, soft_wrap=True)
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        if _file_handle is not None:
+            try:
+                _file_handle.close()
+            except Exception:
+                pass
+        _file_handle = log_path.open("a", encoding="utf-8")
+    chosen = (level or os.environ.get("LOG_LEVEL", "info")).strip().lower()
+    _min_level = _LEVELS.get(chosen, _LEVELS["info"])
+
+
+def _console_or_default() -> Console:
+    global _console
+    if _console is None:
+        _console = Console(stderr=True, highlight=False, soft_wrap=True)
+    return _console
+
+
+def _emit(level: str, event: str, **fields: Any) -> None:
+    if _LEVELS.get(level, 1) < _min_level:
+        return
+    line = {"ts": round(time.time(), 3), "level": level, "event": event, **fields}
+    if _file_handle is not None:
+        try:
+            _file_handle.write(json.dumps(line, default=str, ensure_ascii=False) + "\n")
+            _file_handle.flush()
+        except Exception:
+            # File logging must never crash the orchestrator.
+            pass
+    pretty = " ".join(f"{k}={v}" for k, v in fields.items())
+    style = {
+        "info": "cyan",
+        "warn": "yellow",
+        "error": "red",
+        "ok": "green",
+        "debug": "dim",
+    }.get(level, "white")
+    _console_or_default().print(f"[{style}]{level:>5}[/] {event} {pretty}")
+
+
+# ---------------------------------------------------------------------------
+# Public level helpers
+# ---------------------------------------------------------------------------
+
+
+def debug(event: str, **fields: Any) -> None:
+    """Fine-grained internal trace (selector picks, per-element decisions)."""
+    _emit("debug", event, **fields)
+
+
+def info(event: str, **fields: Any) -> None:
+    """Stage transition or a single decision the human cares about."""
+    _emit("info", event, **fields)
+
+
+def ok(event: str, **fields: Any) -> None:
+    """A stage finished successfully (renders green)."""
+    _emit("ok", event, **fields)
+
+
+def warn(event: str, **fields: Any) -> None:
+    """Something is wrong but the run continues."""
+    _emit("warn", event, **fields)
+
+
+def error(event: str, **fields: Any) -> None:
+    """The current stage / URL failed; run may continue with others."""
+    _emit("error", event, **fields)
+
+
+def die(event: str, **fields: Any) -> None:
+    """Log an error and exit the process. Use sparingly."""
+    _emit("error", event, **fields)
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Specialised helpers
+# ---------------------------------------------------------------------------
+
+
+def llm_call(
+    *,
+    model: str,
+    purpose: str,
+    in_tokens: int,
+    out_tokens: int,
+    duration_s: float,
+    cached: bool = False,
+    **extra: Any,
+) -> None:
+    """Uniform record for every LLM invocation.
+
+    ``cached=True`` means the call was satisfied from the on-disk
+    plan cache (no network traffic, no token spend).
+    """
+    info(
+        "llm_call",
+        model=model,
+        purpose=purpose,
+        in_tokens=in_tokens,
+        out_tokens=out_tokens,
+        total_tokens=in_tokens + out_tokens,
+        duration=f"{duration_s:.2f}s",
+        cached=cached,
+        **extra,
+    )
+
+
+def safe_url(url: str | None) -> str:
+    """Strip query string + fragment from a URL.
+
+    The query string is the most common place to find tokens, codes,
+    or session identifiers. Stripping it keeps the host + path useful
+    for diagnostics without leaking secrets into logs.
+    """
+    if not url:
+        return ""
+    try:
+        p = urlsplit(url)
+        return urlunsplit((p.scheme, p.netloc, p.path, "", ""))
+    except Exception:
+        return "<unparseable-url>"
+
+
+def stage(name: str, **fields: Any) -> None:
+    """Mark a stage boundary. Helpful when scanning the run log."""
+    info(f"stage:{name}", **fields)

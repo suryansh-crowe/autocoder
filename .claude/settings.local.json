@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m compileall -q autocoder tests conftest.py)",
+      "Bash(mkdir -p src)",
+      "Bash(mv autocoder *)",
+      "Bash(mv src/autocoder/manifest src/autocoder/registry)",
+      "Bash(rm README.md)",
+      "Bash(python -m compileall -q src tests conftest.py)",
+      "Bash(PYTHONPATH=src python -m pytest tests/unit/test_url_sources.py -v)",
+      "Bash(PYTHONPATH=src python -m pytest tests/unit -q)",
+      "Bash(PYTHONPATH=src python -c \"from autocoder import logger; logger.init\\(level='debug'\\); logger.debug\\('test_debug', a=1\\); logger.info\\('test_info', b=2\\); logger.warn\\('test_warn', c=3\\); logger.llm_call\\(model='phi4:14b', purpose='test', in_tokens=100, out_tokens=50, duration_s=1.5\\); print\\('--- safe_url ---'\\); print\\(logger.safe_url\\('https://app.example.com/login?token=secret&u=me#frag'\\)\\)\")",
+      "Bash(python -m pip list)",
+      "Bash(curl -s --max-time 5 http://localhost:11434/api/tags)",
+      "Bash(python -c ' *)",
+      "Bash(python -m pip install -e . --quiet)",
+      "Bash(python -m pip show autocoder)",
+      "Bash(python -m pytest tests/unit -q)",
+      "Bash(python -c 'from playwright.sync_api import sync_playwright *)",
+      "Bash(autocoder --help)",
+      "Bash(autocoder generate *)",
+      "Bash(tee /tmp/autocoder_run.log)",
+      "Bash(tasklist)",
+      "Bash(tee /tmp/autocoder_run2.log)",
+      "Bash(autocoder status *)",
+      "Bash(taskkill /PID 7096 /F)",
+      "Bash(taskkill /F /IM chromium.exe)",
+      "Bash(taskkill //PID 7096 //F)",
+      "Bash(OLLAMA_NUM_PREDICT=2048 autocoder generate)",
+      "Bash(tee /tmp/autocoder_run3.log)"
+    ]
+  },
+  "disabledMcpjsonServers": [
+    "callme"
+  ]
+}
