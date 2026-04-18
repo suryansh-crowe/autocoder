@@ -86,7 +86,7 @@ autocoder/                        Project root (= the "autocoder" project)
     extractions/                    Per-URL compact extraction snapshots (JSON)
     plans/                          Cached LLM POM/feature plans (skip on rerun)
     heals/                          Cached heal suggestions (stub + failure)
-    runs.log                        Newline-delimited JSON run log
+    logs/<YYYYMMDD-HHMMSS>-<cmd>.log Per-invocation newline-delimited JSON run log
 
   readme/                         This documentation set
   scripts/

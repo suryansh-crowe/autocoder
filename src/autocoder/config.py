@@ -72,7 +72,7 @@ class Paths:
     manifest_dir: Path
     extractions_dir: Path
     plans_dir: Path
-    runs_log: Path
+    logs_dir: Path
     storage_state: Path
     tests_dir: Path
     features_dir: Path
@@ -130,7 +130,7 @@ def load_settings(project_root: Path | None = None) -> Settings:
         manifest_dir=manifest_dir,
         extractions_dir=manifest_dir / "extractions",
         plans_dir=manifest_dir / "plans",
-        runs_log=manifest_dir / "runs.log",
+        logs_dir=manifest_dir / "logs",
         storage_state=storage_state,
         tests_dir=tests_dir,
         features_dir=tests_dir / "features",
@@ -173,6 +173,7 @@ def ensure_dirs(settings: Settings) -> None:
         settings.paths.manifest_dir,
         settings.paths.extractions_dir,
         settings.paths.plans_dir,
+        settings.paths.logs_dir,
         settings.paths.tests_dir,
         settings.paths.features_dir,
         settings.paths.steps_dir,

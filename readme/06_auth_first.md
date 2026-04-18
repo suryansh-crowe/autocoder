@@ -73,7 +73,7 @@ process environment.** Specifically:
 - The classifier and inspector never read `LOGIN_USERNAME` /
   `LOGIN_PASSWORD`.
 - The LLM prompts contain no env var values.
-- `manifest/registry.yaml` and `manifest/runs.log` only record env
+- `manifest/registry.yaml` and `manifest/logs/*.log` only record env
   *names*, never values.
 - `.env` is gitignored. `.env.example` ships placeholders only.
 

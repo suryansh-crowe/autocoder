@@ -163,7 +163,7 @@ def heal_steps(settings: Settings, opts: HealOptions) -> list[HealResult]:
     body is no longer a stub.
     """
     ensure_dirs(settings)
-    logger.init(settings.paths.runs_log, level=settings.log_level)
+    logger.init(settings.paths.logs_dir, level=settings.log_level)
     started = time.monotonic()
 
     failures: list[PytestFailure] = []

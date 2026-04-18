@@ -83,7 +83,7 @@ class StageResult:
 def run_generate(settings: Settings, opts: GenerateOptions) -> list[StageResult]:
     """Main entry point used by ``autocoder generate``."""
     ensure_dirs(settings)
-    logger.init(settings.paths.runs_log, level=settings.log_level)
+    logger.init(settings.paths.logs_dir, level=settings.log_level)
     run_started = time.monotonic()
     logger.stage(
         "run_start",

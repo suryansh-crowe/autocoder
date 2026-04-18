@@ -21,7 +21,9 @@ manifest/
   heals/<slug>.<key>.json           cached stub-heal suggestions
   heals/<slug>.fail.<key>.json      cached failure-heal suggestions
   heals/last-pytest.xml             JUnit XML from `heal --from-pytest`
-  runs.log              newline-delimited JSON, one event per line
+  logs/<YYYYMMDD-HHMMSS>-<cmd>.log
+                        per-invocation newline-delimited JSON log
+                        (one file per `autocoder ...` command)
 ```
 
 `registry.yaml` is the only file you should edit by hand. The others
@@ -120,16 +122,28 @@ If you omit `<urls>`, extension applies to every URL in the registry.
 
 ## Logs
 
-`manifest/runs.log` is newline-delimited JSON, one event per line:
+Each `autocoder ...` invocation opens a fresh file under
+`manifest/logs/` named `<YYYYMMDD>-<HHMMSS>-<cmd>.log` — for example
+`20260419-223728-generate.log`. The file contains newline-delimited
+JSON, one event per line:
 
 ```json
-{"ts": 1737067321.4, "level": "info", "event": "ollama_call", "model": "phi4:14b", "duration": "37.2s", "in_tokens": 412, "out_tokens": 124}
+{"ts": 1737067321.4, "level": "info", "event": "llm_call", "model": "phi4:14b", "purpose": "pom_plan:login_page", "in_tokens": 412, "out_tokens": 124, "total_tokens": 536, "duration": "37.21s", "cached": false}
 {"ts": 1737067358.1, "level": "ok",   "event": "auth_setup_written", "path": "tests/auth_setup/test_auth_setup.py"}
 {"ts": 1737067512.7, "level": "warn", "event": "feature_plan_issue", "fixture": "dashboard_page", "msg": "duplicate scenario title dropped: User opens dashboard"}
 ```
 
-Tail it during a run for live progress. Grep for `level=warn|error` for
-post-mortem.
+Tail the latest:
+
+```bash
+tail -f manifest/logs/$(ls -t manifest/logs | head -1)
+```
+
+Grep for `level=warn|error` across all runs for post-mortem:
+
+```bash
+jq -r 'select(.level=="warn" or .level=="error")' manifest/logs/*.log
+```
 
 ## Hand edits
 

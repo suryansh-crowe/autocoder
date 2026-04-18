@@ -84,14 +84,16 @@ edit is preserved across reruns.
 
 ## Logs and tokens
 
-Every heal call lands in `manifest/runs.log` with the same
-`llm_call` schema as POM/feature plans, plus a `purpose` field
-shaped `heal:<slug>:<function_name>` so you can filter:
+Every heal call lands in the per-invocation log file
+(`manifest/logs/<ts>-heal.log`) with the same `llm_call` schema as
+POM/feature plans, plus a `purpose` field shaped
+`heal:<slug>:<function_name>` (or `heal_fail:...` for failure heal)
+so you can filter:
 
 ```bash
-jq -r 'select(.event=="llm_call" and (.purpose|startswith("heal:"))) |
+jq -r 'select(.event=="llm_call" and (.purpose|startswith("heal"))) |
        "\(.purpose)  in=\(.in_tokens) out=\(.out_tokens) cached=\(.cached)"' \
-   manifest/runs.log
+   manifest/logs/*-heal.log
 ```
 
 Stage-level events: `heal_start`, `heal_context_loaded` per slug,

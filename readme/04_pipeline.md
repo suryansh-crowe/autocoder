@@ -96,7 +96,7 @@ is deterministic.
 │ 8. PERSIST     autocoder/registry/store.py                     │
 │   ─ status      pending → extracted → pom_ready →              │
 │                 feature_ready → steps_ready → complete         │
-│   ─ writes      registry.yaml + manifest/runs.log              │
+│   ─ writes      registry.yaml + manifest/logs/<ts>-<cmd>.log   │
 └────────────────────────────────────────────────────────────────┘
                           │
                           ▼
@@ -116,7 +116,7 @@ is deterministic.
 | 6. Feature plan| `autocoder/llm/plans.py`            | ~350 in / ~180 out | `manifest/plans/*.feature.<tiers>.<fp>.json` |
 | 7a. Feature    | `autocoder/generate/feature.py`     | 0                  | `tests/features/<slug>.feature` |
 | 7b. Steps      | `autocoder/generate/steps.py`       | 0                  | `tests/steps/test_<slug>.py` |
-| 8. Persist     | `autocoder/registry/`               | 0                  | `registry.yaml` + `runs.log` |
+| 8. Persist     | `autocoder/registry/`               | 0                  | `registry.yaml` + `manifest/logs/<ts>-<cmd>.log` |
 | **9. Heal (optional)** | `autocoder/heal/`           | ~250 in / ~30 out per stub; ~400 / ~80 per failure | Step bodies in `tests/steps/test_<slug>.py` (stub fill or runtime-failure revision) |
 
 ## Resume / rerun in one paragraph

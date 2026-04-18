@@ -146,7 +146,7 @@ the real success URL, real credentials, real MFA flow.
 | Heal stubs | `autocoder heal [--slug X] [--dry-run]` |
 | Heal runtime failures | `autocoder heal --from-pytest [--slug X]` |
 | Verify local-only | `python scripts/verify_local_llm.py` |
-| Tail run log | `tail -f manifest/runs.log` |
+| Tail latest run log | `tail -f manifest/logs/$(ls -t manifest/logs \| head -1)` |
 
 ## When something fails
 

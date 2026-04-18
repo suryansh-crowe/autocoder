@@ -153,7 +153,7 @@ def generate(
     URL source priority: CLI args > --urls-file > $AUTOCODER_URLS.
     """
     settings = load_settings()
-    logger.init(settings.paths.runs_log, level=settings.log_level)
+    logger.init(settings.paths.logs_dir, level=settings.log_level, command="generate")
     chosen_tiers = list(tiers) or list(DEFAULT_TIERS)
     logger.info(
         "cli_invoke",
@@ -162,6 +162,7 @@ def generate(
         skip_llm=skip_llm,
         tiers=",".join(chosen_tiers),
         log_level=settings.log_level,
+        log_file=str(logger.active_log_path() or ""),
     )
     resolved = _resolve_or_exit(urls, urls_file, settings)
     opts = GenerateOptions(
@@ -180,8 +181,14 @@ def generate(
 def rerun(force: bool) -> None:
     """Reprocess every URL already in the registry."""
     settings = load_settings()
-    logger.init(settings.paths.runs_log, level=settings.log_level)
-    logger.info("cli_invoke", cmd="rerun", force=force, log_level=settings.log_level)
+    logger.init(settings.paths.logs_dir, level=settings.log_level, command="rerun")
+    logger.info(
+        "cli_invoke",
+        cmd="rerun",
+        force=force,
+        log_level=settings.log_level,
+        log_file=str(logger.active_log_path() or ""),
+    )
     registry = run_status(settings)
     if not registry.nodes:
         logger.warn("rerun_no_registry", path=str(settings.paths.registry_path))
@@ -226,12 +233,13 @@ def extend(
     URL source priority: CLI args > --urls-file > $AUTOCODER_URLS > entire registry.
     """
     settings = load_settings()
-    logger.init(settings.paths.runs_log, level=settings.log_level)
+    logger.init(settings.paths.logs_dir, level=settings.log_level, command="extend")
     logger.info(
         "cli_invoke",
         cmd="extend",
         extra_tiers=",".join(extra_tiers),
         log_level=settings.log_level,
+        log_file=str(logger.active_log_path() or ""),
     )
     resolved = _resolve_or_exit(urls, urls_file, settings, require=False)
     results = run_extend(settings, resolved, list(extra_tiers))
@@ -276,7 +284,7 @@ def heal(
     something actually changed.
     """
     settings = load_settings()
-    logger.init(settings.paths.runs_log, level=settings.log_level)
+    logger.init(settings.paths.logs_dir, level=settings.log_level, command="heal")
     logger.info(
         "cli_invoke",
         cmd="heal",
@@ -285,6 +293,7 @@ def heal(
         force=force,
         from_pytest=from_pytest or junit_xml is not None,
         log_level=settings.log_level,
+        log_file=str(logger.active_log_path() or ""),
     )
     opts = HealOptions(
         slug=slug,

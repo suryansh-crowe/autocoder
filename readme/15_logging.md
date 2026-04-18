@@ -4,8 +4,12 @@ The system is fully traceable end-to-end. Every stage emits structured
 events to two sinks at the same time:
 
 - **Console** (stderr, coloured) — for the human running the script.
-- **`manifest/runs.log`** (newline-delimited JSON) — for grep / jq /
-  post-mortem inspection across runs.
+- **Per-invocation log file** under `manifest/logs/`, named
+  `<YYYYMMDD>-<HHMMSS>-<cmd>.log` (e.g.
+  `20260419-223728-generate.log`). Newline-delimited JSON, one event
+  per line. Each `autocoder ...` invocation gets its own file — no
+  more single growing log. The CLI prints the active path on the
+  first `cli_invoke` event so you can `tail -f` it directly.
 
 Both sinks share the same schema, so anything you see live can also
 be reviewed later from disk.
@@ -39,7 +43,7 @@ Console:
  warn feature_plan_issue fixture=dashboard_page msg=duplicate scenario title dropped: User opens dashboard
 ```
 
-`manifest/runs.log` (one JSON object per line):
+`manifest/logs/<ts>-<cmd>.log` (one JSON object per line):
 
 ```json
 {"ts": 1737067321.4, "level": "info", "event": "llm_call",
@@ -62,16 +66,25 @@ Every LLM invocation emits one `llm_call` event with a uniform shape:
 | `duration`     | Wall time as `"NN.NNs"`.                             |
 | `cached`       | `true` when the on-disk plan cache satisfied the call (zero spend). |
 
-Quick token totals from a finished run:
+Quick token totals from the latest run:
 
 ```bash
-# Total tokens spent across the whole run
+LATEST=manifest/logs/$(ls -t manifest/logs | head -1)
+
+# Total tokens spent in the latest run
 jq 'select(.event=="llm_call" and .cached==false) | .total_tokens' \
-   manifest/runs.log | paste -sd+ - | bc
+   "$LATEST" | paste -sd+ - | bc
 
 # Per-purpose breakdown
 jq -r 'select(.event=="llm_call") | "\(.purpose) \(.total_tokens) cached=\(.cached)"' \
-   manifest/runs.log
+   "$LATEST"
+```
+
+Across all runs (cumulative):
+
+```bash
+jq -s 'map(select(.event=="llm_call" and .cached==false) | .total_tokens) | add' \
+   manifest/logs/*.log
 ```
 
 ## Decision logging
@@ -114,11 +127,11 @@ stage:pom_plan           slug=dashboard fixture=dashboard_page elements=24
 stage:feature_plan       slug=dashboard tiers=smoke,happy,validation pom_methods=8
 ```
 
-Filter the run log by stage:
+Filter the latest run log by stage:
 
 ```bash
 jq -r 'select(.event | startswith("stage:")) | "\(.event) \(.slug // "")"' \
-   manifest/runs.log
+   manifest/logs/$(ls -t manifest/logs | head -1)
 ```
 
 ## What is *never* logged
@@ -139,27 +152,28 @@ Specifically, the system never logs:
 - LLM prompt / response bodies — only character counts (`sys_chars`,
   `user_chars`) and token counts. No prompt text, no response text.
 
-If you ever spot a credential value in `manifest/runs.log`, treat it
-as a bug. Open the offending line, identify the call site, and fix it
-(usually by replacing a value with `secret_present(name)` or a name
-string).
+If you ever spot a credential value in any `manifest/logs/*.log`,
+treat it as a bug. Open the offending line, identify the call site,
+and fix it (usually by replacing a value with `secret_present(name)`
+or a name string).
 
 ## How to use the log day-to-day
 
 ```bash
 # Live-tail during a run (in a second terminal)
-tail -f manifest/runs.log | jq -r '"\(.level | ascii_upcase) \(.event) \(. | tostring)"'
+tail -f manifest/logs/$(ls -t manifest/logs | head -1) \
+  | jq -r '"\(.level | ascii_upcase) \(.event) \(. | tostring)"'
 
-# Show only warnings + errors from the last run
-jq -r 'select(.level=="warn" or .level=="error") | "\(.event) \(. | tostring)"' \
-   manifest/runs.log | tail -50
+# Show only warnings + errors across every run
+jq -r 'select(.level=="warn" or .level=="error") | "\(input_filename) \(.event) \(. | tostring)"' \
+   manifest/logs/*.log | tail -50
 
-# Count cache hits vs LLM calls by purpose
+# Count cache hits vs LLM calls by purpose, across every run
 jq -r 'select(.event=="llm_call") | "\(.purpose) cached=\(.cached)"' \
-   manifest/runs.log | sort | uniq -c | sort -rn
+   manifest/logs/*.log | sort | uniq -c | sort -rn
 
-# Audit secret handling — should return zero matches
-jq -r '. | tostring' manifest/runs.log \
+# Audit secret handling across every run — should return zero matches
+jq -r '. | tostring' manifest/logs/*.log \
   | grep -E '(password|secret|token)=[^ ]' \
   | grep -v 'present=' | grep -v 'env='
 ```

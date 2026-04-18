@@ -3,7 +3,7 @@
 The single source of truth is the on-disk ``manifest/registry.yaml``
 file (path is configured via ``AUTOCODER_MANIFEST_DIR``). This Python
 subpackage owns the read/write/diff/resume logic for it. Everything
-else under ``manifest/`` (extractions, plans, runs.log) is derived
+else under ``manifest/`` (extractions, plans, heals, logs) is derived
 data that can be regenerated.
 """
 

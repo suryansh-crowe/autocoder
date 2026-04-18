@@ -1,5 +1,0 @@
-{
-  "body": "login_page.fill_email('your-email@example.com')",
-  "intent": "Fill the email input field with an email address.",
-  "errors": []
-}

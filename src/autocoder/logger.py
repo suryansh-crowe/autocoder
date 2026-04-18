@@ -3,9 +3,10 @@
 Two sinks:
 
 * **Console** (stderr, coloured) — for the human running the script.
-* **`manifest/runs.log`** (newline-delimited JSON) — for post-mortem
-  inspection. Every record carries ``ts``, ``level``, ``event``, plus
-  whatever ``key=value`` fields the caller supplied.
+* **`manifest/logs/<YYYYMMDD>-<HHMMSS>-<cmd>.log`** — one fresh
+  newline-delimited JSON file per ``autocoder ...`` invocation. Each
+  record carries ``ts``, ``level``, ``event``, plus whatever
+  ``key=value`` fields the caller supplied.
 
 Levels (lowest to highest):
 
@@ -47,27 +48,72 @@ _LEVELS: dict[str, int] = {"debug": 0, "info": 1, "ok": 1, "warn": 2, "error": 3
 
 _console: Console | None = None
 _file_handle: TextIO | None = None
+_active_log_path: Path | None = None
 _min_level: int = _LEVELS["info"]
 
 
-def init(log_path: Path | None = None, level: str | None = None) -> None:
-    """Configure the console + optional persistent log file.
+def init(
+    log_target: Path | None = None,
+    level: str | None = None,
+    *,
+    command: str | None = None,
+) -> None:
+    """Configure the console + per-invocation log file.
 
-    Safe to call multiple times — later calls update the threshold and
-    re-open the file handle if needed.
+    ``log_target`` may be:
+
+    * a **directory** — a fresh per-invocation file is opened inside
+      it, named ``<YYYYMMDD>-<HHMMSS>-<command>.log`` (or
+      ``...-run.log`` when ``command`` is omitted). Collisions get
+      a ``-2`` / ``-3`` / ... suffix so two invocations in the same
+      second never share a file.
+    * a **file path** — opened in append mode (legacy behaviour;
+      kept so callers that explicitly want a single growing file
+      can still use it).
+    * ``None`` — console only.
+
+    Idempotent within a process: the **first** call that establishes
+    a file handle wins. Later calls only refresh the level threshold,
+    so the orchestrator's `init` after the CLI's `init` doesn't open
+    a second file.
+
+    Always safe to call multiple times.
     """
-    global _console, _file_handle, _min_level
+    global _console, _file_handle, _active_log_path, _min_level
     _console = Console(stderr=True, highlight=False, soft_wrap=True)
-    if log_path is not None:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        if _file_handle is not None:
-            try:
-                _file_handle.close()
-            except Exception:
-                pass
-        _file_handle = log_path.open("a", encoding="utf-8")
+    if log_target is not None and _file_handle is None:
+        path = _resolve_log_path(log_target, command)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _file_handle = path.open("a", encoding="utf-8")
+        _active_log_path = path
     chosen = (level or os.environ.get("LOG_LEVEL", "info")).strip().lower()
     _min_level = _LEVELS.get(chosen, _LEVELS["info"])
+
+
+def _resolve_log_path(target: Path, command: str | None) -> Path:
+    """Decide the actual file path for ``target``.
+
+    Directory targets get a timestamped per-invocation filename;
+    file targets are returned as-is.
+    """
+    treat_as_dir = target.is_dir() or (not target.exists() and not target.suffix)
+    if not treat_as_dir:
+        return target
+    target.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    cmd = command or "run"
+    base = f"{ts}-{cmd}"
+    candidate = target / f"{base}.log"
+    n = 2
+    while candidate.exists():
+        candidate = target / f"{base}-{n}.log"
+        n += 1
+    return candidate
+
+
+def active_log_path() -> Path | None:
+    """Path of the file the logger is currently writing to (or None)."""
+    return _active_log_path
 
 
 def _console_or_default() -> Console:

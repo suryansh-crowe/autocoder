@@ -45,7 +45,12 @@
       "Bash(python -c \"import sys, json; d=json.loads\\(sys.stdin.read\\(\\)\\); [print\\(f'  {k} -> {v}'\\) for k,v in d.items\\(\\)]\")",
       "Bash(python scripts/verify_local_llm.py)",
       "Bash(tee /tmp/verify.log)",
-      "Bash(tee /tmp/verify2.log)"
+      "Bash(tee /tmp/verify2.log)",
+      "Bash(rm -f tests/pages/login_page.py tests/pages/stewie_page.py)",
+      "Bash(rm -f tests/features/*.feature)",
+      "Bash(rm -f tests/steps/test_login.py tests/steps/test_stewie.py)",
+      "Bash(rm -f tests/auth_setup/test_*.py)",
+      "Bash(rm -f tests/.auth/*.json)"
     ]
   },
   "disabledMcpjsonServers": [

@@ -1,5 +1,0 @@
-{
-  "body": "expect(login_page.page).to_have_url('https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/login')",
-  "intent": "Check if logged in by URL match",
-  "errors": []
-}

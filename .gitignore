@@ -22,10 +22,11 @@ playwright-report/
 test-results/
 trace.zip
 
-# Manifest payloads (registry stays; raw extractions/plans/logs do not)
+# Manifest payloads (registry stays; raw extractions/plans/logs/heals do not)
 manifest/extractions/
 manifest/plans/
-manifest/runs.log
+manifest/heals/
+manifest/logs/
 manifest/.cache/
 
 # Editors / OS
