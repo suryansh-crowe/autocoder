@@ -20,7 +20,7 @@ def login_page(page: Page) -> LoginPage:
 
 @given(parsers.parse('I am on the login page'))
 def _i_am_on_the_login_page(login_page: LoginPage) -> None:
-    raise NotImplementedError("Implement step: I am on the login page")
+    login_page.navigate()
 
 
 @when(parsers.parse('I click sign in with Microsoft'))
@@ -30,7 +30,7 @@ def _i_click_sign_in_with_microsoft(login_page: LoginPage) -> None:
 
 @then(parsers.parse('I should be logged in successfully'))
 def _i_should_be_logged_in_successfully(login_page: LoginPage) -> None:
-    raise NotImplementedError("Implement step: I should be logged in successfully")
+    expect(login_page.page).to_have_url('https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/login')
 
 
 @when(parsers.parse('I click terms of service'))
@@ -45,4 +45,4 @@ def _i_click_privacy_policy(login_page: LoginPage) -> None:
 
 @when(parsers.parse('I fill in my email address'))
 def _i_fill_in_my_email_address(login_page: LoginPage) -> None:
-    raise NotImplementedError("Implement step: I fill in my email address (POM method 'fill_email' expects: value)")
+    login_page.fill_email('your-email@example.com')

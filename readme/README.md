@@ -28,6 +28,16 @@ finish in a few minutes.
 | 13 | [token_budget.md](13_token_budget.md) | Token cost per stage + why it stays low |
 | 14 | [extending.md](14_extending.md) | Adding selector strategies, tiers, or models |
 | 15 | [logging.md](15_logging.md) | Log levels, token accounting, decision events, redaction rules |
+| 17 | [heal.md](17_heal.md) | `autocoder heal` — auto-fill `NotImplementedError` stubs via the LLM |
+
+## Run reports
+
+End-to-end execution records, each pinned to a specific date and
+codebase state so the findings stay interpretable over time.
+
+| Date | Report |
+|------|--------|
+| 2026-04-18 | [16_run_report_2026-04-18.md](16_run_report_2026-04-18.md) — first end-to-end run; 3 attempts; 5 bugs found and fixed; both URLs reached `complete`; 4 048 tokens spent. |
 
 ## Source-of-truth ordering
 

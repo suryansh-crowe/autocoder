@@ -15,10 +15,12 @@ from autocoder.intake.classifier import classify_urls
 from autocoder.intake.graph import build_dependency_graph, topological_order
 from autocoder.intake.sources import (
     URLSourceError,
+    diagnose_url,
     parse_url_list,
     read_urls_env,
     read_urls_file,
     resolve_urls,
+    validate_urls,
 )
 
 __all__ = [
@@ -26,8 +28,10 @@ __all__ = [
     "build_dependency_graph",
     "topological_order",
     "URLSourceError",
+    "diagnose_url",
     "parse_url_list",
     "read_urls_env",
     "read_urls_file",
     "resolve_urls",
+    "validate_urls",
 ]

@@ -169,17 +169,34 @@ def llm_call(
 
 
 def safe_url(url: str | None) -> str:
-    """Strip query string + fragment from a URL.
+    """Return ``url`` with anything that may carry a secret stripped out.
 
-    The query string is the most common place to find tokens, codes,
-    or session identifiers. Stripping it keeps the host + path useful
-    for diagnostics without leaking secrets into logs.
+    Three shapes are redacted:
+
+    * ``userinfo`` (``user:password@``) — Basic-Auth credentials
+      embedded in the URL. Removed entirely; the URL is rebuilt from
+      ``hostname`` + ``port`` so credentials cannot leak via the
+      ``netloc`` field.
+    * **query string** — most common place for one-time tokens,
+      session ids, and OAuth codes.
+    * **fragment** — sometimes used to carry tokens by SPAs.
+
+    IPv6 hosts are re-bracketed so the rebuilt URL is RFC-3986 valid.
+    Returns ``""`` for falsy input and ``"<unparseable-url>"`` if
+    parsing raises.
     """
     if not url:
         return ""
     try:
         p = urlsplit(url)
-        return urlunsplit((p.scheme, p.netloc, p.path, "", ""))
+        host = p.hostname or ""
+        # Re-bracket IPv6 literals (urlparse strips the brackets in .hostname).
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        netloc = host
+        if p.port is not None:
+            netloc = f"{host}:{p.port}"
+        return urlunsplit((p.scheme, netloc, p.path, "", ""))
     except Exception:
         return "<unparseable-url>"
 

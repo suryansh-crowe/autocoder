@@ -10,6 +10,7 @@ from autocoder.intake.sources import (
     ENV_VAR,
     ResolvedURLs,
     URLSourceError,
+    diagnose_url,
     parse_url_list,
     read_urls_env,
     read_urls_file,
@@ -223,3 +224,192 @@ def test_resolve_settings_fallback_skips_empties() -> None:
         cli_urls=None, urls_file=None, env={}, settings_fallback=[None, "", "   "]
     )
     assert result == ResolvedURLs(urls=[], source="none")
+
+
+# ---------------------------------------------------------------------------
+# Regression: structure-aware splitting (URLs with commas in query/fragment)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_keeps_comma_inside_query_string() -> None:
+    """Regression for the original bug: query-string commas were being
+    treated as URL separators, splitting one URL into garbage fragments."""
+    text = "https://example.com/api?fields=name,email,role"
+    assert parse_url_list(text) == [text]
+
+
+def test_parse_keeps_comma_inside_fragment() -> None:
+    text = "https://example.com/page#a,b,c"
+    assert parse_url_list(text) == [text]
+
+
+def test_parse_splits_only_at_url_boundaries_in_csv() -> None:
+    text = (
+        "https://a.example.com/api?fields=x,y,z,"
+        "https://b.example.com/api?fields=p,q"
+    )
+    assert parse_url_list(text) == [
+        "https://a.example.com/api?fields=x,y,z",
+        "https://b.example.com/api?fields=p,q",
+    ]
+
+
+def test_parse_csv_with_whitespace_after_separator() -> None:
+    text = "https://a.example.com,  https://b.example.com  ,https://c.example.com"
+    assert parse_url_list(text) == [
+        "https://a.example.com",
+        "https://b.example.com",
+        "https://c.example.com",
+    ]
+
+
+def test_parse_mixed_newlines_and_commas() -> None:
+    text = (
+        "https://a.example.com/api?q=1,2\n"
+        "https://b.example.com/api?q=3,4,https://c.example.com\n"
+    )
+    # Note: 3rd URL is a comma-separated continuation of the 2nd line.
+    assert parse_url_list(text) == [
+        "https://a.example.com/api?q=1,2",
+        "https://b.example.com/api?q=3,4",
+        "https://c.example.com",
+    ]
+
+
+def test_parse_carriage_returns_treated_as_line_breaks() -> None:
+    text = "https://a.example.com\r\nhttps://b.example.com\rhttps://c.example.com"
+    assert parse_url_list(text) == [
+        "https://a.example.com",
+        "https://b.example.com",
+        "https://c.example.com",
+    ]
+
+
+def test_parse_url_with_trailing_slash_preserved() -> None:
+    text = "https://a.example.com/path/\nhttps://b.example.com/path"
+    assert parse_url_list(text) == [
+        "https://a.example.com/path/",
+        "https://b.example.com/path",
+    ]
+
+
+def test_parse_url_with_userinfo_preserved_for_orchestrator() -> None:
+    """Orchestrator may need basic-auth URLs verbatim. Stripping happens
+    at log time (logger.safe_url), not at parse time."""
+    text = "https://user:pw@a.example.com/x"
+    assert parse_url_list(text) == [text]
+
+
+# ---------------------------------------------------------------------------
+# diagnose_url: per-URL reasons
+# ---------------------------------------------------------------------------
+
+
+def test_diagnose_accepts_https() -> None:
+    assert diagnose_url("https://app.example.com/x") is None
+
+
+def test_diagnose_accepts_http() -> None:
+    assert diagnose_url("http://app.example.com/x") is None
+
+
+def test_diagnose_accepts_url_with_query_and_fragment() -> None:
+    assert diagnose_url("https://a.example.com/p?q=1,2,3#section") is None
+
+
+def test_diagnose_accepts_url_with_port() -> None:
+    assert diagnose_url("https://a.example.com:8443/x") is None
+
+
+def test_diagnose_accepts_ipv6_host() -> None:
+    assert diagnose_url("https://[2001:db8::1]:8443/x") is None
+
+
+def test_diagnose_rejects_missing_scheme_with_helpful_hint() -> None:
+    reason = diagnose_url("app.example.com/x")
+    assert reason is not None
+    assert "missing http/https scheme" in reason
+    assert "https://app.example.com/x" in reason
+
+
+def test_diagnose_rejects_unsupported_scheme() -> None:
+    reason = diagnose_url("ftp://a.example.com")
+    assert reason is not None
+    assert "unsupported scheme" in reason
+    assert "'ftp'" in reason
+
+
+def test_diagnose_rejects_missing_host() -> None:
+    reason = diagnose_url("https://")
+    assert reason is not None
+    assert "missing host" in reason
+
+
+def test_diagnose_rejects_blank() -> None:
+    assert diagnose_url("") is not None
+    assert diagnose_url("   ") is not None
+
+
+def test_diagnose_rejects_non_string() -> None:
+    # mypy would catch this at type check time; at runtime we still degrade
+    # gracefully rather than raising deep in the parser.
+    assert diagnose_url(None) is not None  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Validate: error message quality
+# ---------------------------------------------------------------------------
+
+
+def test_validate_error_includes_per_url_reason() -> None:
+    with pytest.raises(URLSourceError) as exc:
+        validate_urls(
+            ["https://ok.example.com", "ftp://bad.example.com", "no-scheme.example.com"],
+            "test source",
+        )
+    msg = str(exc.value)
+    assert "ftp://bad.example.com" in msg
+    assert "unsupported scheme" in msg
+    assert "no-scheme.example.com" in msg
+    assert "missing http/https scheme" in msg
+
+
+# ---------------------------------------------------------------------------
+# End-to-end resolver behaviour for the regression case
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_env_with_query_comma_url_preserved() -> None:
+    env = {ENV_VAR: "https://example.com/api?fields=name,email,role"}
+    result = resolve_urls(cli_urls=None, urls_file=None, env=env)
+    assert result.urls == ["https://example.com/api?fields=name,email,role"]
+    assert result.source == "env"
+
+
+def test_resolve_file_with_csv_and_query_commas(tmp_path: Path) -> None:
+    p = tmp_path / "urls.txt"
+    p.write_text(
+        "https://a.example.com/api?fields=x,y\n"
+        "https://b.example.com/api?fields=p,q,r\n",
+        encoding="utf-8",
+    )
+    result = resolve_urls(cli_urls=None, urls_file=p, env={})
+    assert result.urls == [
+        "https://a.example.com/api?fields=x,y",
+        "https://b.example.com/api?fields=p,q,r",
+    ]
+
+
+def test_resolve_cli_args_each_with_internal_commas() -> None:
+    result = resolve_urls(
+        cli_urls=[
+            "https://a.example.com/api?fields=x,y",
+            "https://b.example.com/api?fields=p,q",
+        ],
+        urls_file=None,
+        env={},
+    )
+    assert result.urls == [
+        "https://a.example.com/api?fields=x,y",
+        "https://b.example.com/api?fields=p,q",
+    ]

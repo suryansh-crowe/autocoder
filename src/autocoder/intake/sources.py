@@ -16,13 +16,18 @@ This module is the single place that knows about all four. The CLI
 calls :func:`resolve_urls` and gets back a deduped, validated list
 plus the source it came from (used for logging).
 
-Validation is deliberate: a malformed URL is reported with the source
-that contributed it so the user knows where to fix it.
+URL parsing is done with `urllib.parse` semantics throughout — never
+naive string splits. Splitting respects URL boundaries so URLs whose
+own query strings contain commas (`?fields=a,b,c`) survive intact.
+Validation reports each malformed URL with a specific reason
+(missing scheme, unsupported scheme, missing host, parse error) and
+the source it came from so the user knows where to fix it.
 """
 
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -30,7 +35,20 @@ from urllib.parse import urlparse
 
 ENV_VAR = "AUTOCODER_URLS"
 
-_VALID_SCHEMES = {"http", "https"}
+_VALID_SCHEMES = ("http", "https")
+
+# Splitter for URL list blobs.
+#
+# We split on:
+#   * any run of newline characters, OR
+#   * a comma followed by optional whitespace and a URL scheme
+#     (`http://` / `https://`).
+#
+# That second arm is the key fix: a comma inside a URL's query string
+# (e.g. `?fields=name,email,role`) is NOT followed by `http(s)://`, so
+# the regex leaves it alone. A comma between two real URLs IS followed
+# by `http(s)://`, so it splits cleanly.
+_LIST_SPLIT_RE = re.compile(r"[\r\n]+|,\s*(?=https?://)", re.IGNORECASE)
 
 
 class URLSourceError(ValueError):
@@ -40,11 +58,20 @@ class URLSourceError(ValueError):
 @dataclass(frozen=True)
 class ResolvedURLs:
     urls: list[str]
-    source: str  # "cli", "file:<path>", "env", or "none"
+    source: str  # "cli", "file:<path>", "env", "settings", or "none"
+
+
+# ---------------------------------------------------------------------------
+# Parsing
+# ---------------------------------------------------------------------------
 
 
 def parse_url_list(text: str | None) -> list[str]:
     """Split a comma- or newline-separated URL blob into clean entries.
+
+    The split is **structure-aware**: only newlines and ``,http(s)://``
+    boundaries break the input. Commas embedded inside a URL's query
+    or fragment are preserved.
 
     Strips whitespace, drops blanks, drops ``#`` comment lines.
     Preserves order and removes duplicates.
@@ -53,9 +80,8 @@ def parse_url_list(text: str | None) -> list[str]:
         return []
     seen: set[str] = set()
     out: list[str] = []
-    # Allow either commas or newlines as separators (or both interleaved).
-    for raw_line in text.replace(",", "\n").splitlines():
-        line = raw_line.strip()
+    for raw in _LIST_SPLIT_RE.split(text):
+        line = raw.strip().rstrip(",").strip()
         if not line or line.startswith("#"):
             continue
         if line in seen:
@@ -84,19 +110,53 @@ def read_urls_env(env: dict[str, str] | None = None) -> list[str]:
     return parse_url_list(src.get(ENV_VAR))
 
 
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+
+def diagnose_url(url: str) -> str | None:
+    """Return ``None`` if ``url`` is valid, else a one-line reason.
+
+    Reasons are user-actionable and never include credential values.
+    """
+    if not isinstance(url, str) or not url.strip():
+        return "empty input"
+    candidate = url.strip()
+    try:
+        parsed = urlparse(candidate)
+    except (ValueError, TypeError) as exc:
+        return f"unparseable ({exc!s})"
+
+    scheme = (parsed.scheme or "").lower()
+    if not scheme:
+        # Common mistake: pasted host with no scheme. Suggest the fix.
+        return f"missing http/https scheme — try 'https://{candidate}'"
+    if scheme not in _VALID_SCHEMES:
+        return f"unsupported scheme {scheme!r} (only http/https are accepted)"
+    if not (parsed.hostname or parsed.netloc):
+        return "missing host"
+    return None
+
+
 def validate_urls(urls: list[str], source: str) -> list[str]:
     """Reject malformed URLs. Returns the list unchanged on success."""
-    bad: list[str] = []
+    bad: list[tuple[str, str]] = []
     for u in urls:
-        parsed = urlparse(u)
-        if parsed.scheme.lower() not in _VALID_SCHEMES or not parsed.netloc:
-            bad.append(u)
+        reason = diagnose_url(u)
+        if reason is not None:
+            bad.append((u, reason))
     if bad:
-        joined = "\n  - ".join(bad)
+        joined = "\n  - ".join(f"{u} — {why}" for u, why in bad)
         raise URLSourceError(
-            f"{len(bad)} invalid URL(s) from {source} (require http/https + host):\n  - {joined}"
+            f"{len(bad)} invalid URL(s) from {source}:\n  - {joined}"
         )
     return urls
+
+
+# ---------------------------------------------------------------------------
+# Resolution
+# ---------------------------------------------------------------------------
 
 
 def resolve_urls(

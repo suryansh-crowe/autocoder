@@ -28,13 +28,13 @@ nodes:
     requires_auth: false
     depends_on: []
     redirects_to: null
-    status: pending
-    extraction_path: null
+    status: complete
+    extraction_path: C:\Users\singhs14\OneDrive - Crowe LLP\Desktop\autocoder\manifest\extractions\stewie.json
     plan_path: null
-    pom_path: null
-    feature_path: null
-    steps_path: null
-    last_fingerprint: null
+    pom_path: C:\Users\singhs14\OneDrive - Crowe LLP\Desktop\autocoder\tests\pages\stewie_page.py
+    feature_path: C:\Users\singhs14\OneDrive - Crowe LLP\Desktop\autocoder\tests\features\stewie.feature
+    steps_path: C:\Users\singhs14\OneDrive - Crowe LLP\Desktop\autocoder\tests\steps\test_stewie.py
+    last_fingerprint: 6cd2356ec6bed892
     last_run_at: null
     notes: []
-updated_at: '2026-04-18T17:31:03+00:00'
+updated_at: '2026-04-18T17:34:21+00:00'

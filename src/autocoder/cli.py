@@ -40,6 +40,7 @@ from rich.table import Table
 
 from autocoder import logger
 from autocoder.config import load_settings
+from autocoder.heal import HealOptions, heal_steps
 from autocoder.intake.sources import URLSourceError, resolve_urls
 from autocoder.orchestrator import (
     DEFAULT_TIERS,
@@ -238,6 +239,38 @@ def extend(
     logger.ok("cli_done", cmd="extend", processed=len(results))
 
 
+@cli.command("heal")
+@click.option("--slug", default=None, help="Restrict heal to a single URL's step file (test_<slug>.py).")
+@click.option("--dry-run", is_flag=True, help="Show what would change without writing files.")
+@click.option("--force", is_flag=True, help="Ignore the heal cache and re-call the LLM for every stub.")
+def heal(slug: str | None, dry_run: bool, force: bool) -> None:
+    """Auto-fill `NotImplementedError` step stubs via the local LLM.
+
+    Scans `tests/steps/test_*.py` for stubs the renderer left behind,
+    asks the LLM for a single-statement body per stub, validates it
+    against the POM's real method list, and writes it back.
+    Safe to re-run: cached on disk by `(slug, step_text, fingerprint)`.
+    """
+    settings = load_settings()
+    logger.init(settings.paths.runs_log, level=settings.log_level)
+    logger.info(
+        "cli_invoke",
+        cmd="heal",
+        slug=slug or "*",
+        dry_run=dry_run,
+        force=force,
+        log_level=settings.log_level,
+    )
+    results = heal_steps(settings, HealOptions(slug=slug, dry_run=dry_run, force=force))
+    _print_heal_results(results, dry_run=dry_run)
+    logger.ok(
+        "cli_done",
+        cmd="heal",
+        total=len(results),
+        applied=sum(1 for r in results if r.applied),
+    )
+
+
 @cli.command("status")
 def status() -> None:
     """Show what the registry currently knows."""
@@ -284,6 +317,29 @@ def _print_results(results) -> None:
             _short_path(r.pom_path),
             _short_path(r.feature_path),
             _short_path(r.steps_path),
+        )
+    _console.print(table)
+
+
+def _print_heal_results(results, *, dry_run: bool) -> None:
+    if not results:
+        _console.print("[dim]No NotImplementedError stubs found — nothing to heal.[/]")
+        return
+    title = "heal preview (dry-run)" if dry_run else "heal results"
+    table = Table(title=title, show_lines=False)
+    for col in ("file", "function", "step", "applied", "cached", "body"):
+        table.add_column(col, overflow="fold")
+    for r in results:
+        applied = "yes" if r.applied else ("dry" if dry_run and not r.issues else "no")
+        cached = "yes" if r.cached else "no"
+        body = r.suggested_body or ("; ".join(r.issues) if r.issues else "-")
+        table.add_row(
+            _short_path(r.stub.file_path),
+            r.stub.function_name,
+            r.stub.step_text,
+            applied,
+            cached,
+            body[:80],
         )
     _console.print(table)
 

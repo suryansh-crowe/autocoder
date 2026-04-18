@@ -27,7 +27,17 @@
       "Bash(taskkill /F /IM chromium.exe)",
       "Bash(taskkill //PID 7096 //F)",
       "Bash(OLLAMA_NUM_PREDICT=2048 autocoder generate)",
-      "Bash(tee /tmp/autocoder_run3.log)"
+      "Bash(tee /tmp/autocoder_run3.log)",
+      "Bash(py --version)",
+      "Bash(python -c \"import sys; print\\(sys.version\\)\")",
+      "Bash(python -m pytest tests/unit -v)",
+      "Bash(autocoder heal *)",
+      "Bash(OLLAMA_NUM_PREDICT=2048 autocoder heal --slug login --dry-run)",
+      "Bash(tee /tmp/heal_dry.log)",
+      "Bash(python -c \" import sys, json for line in sys.stdin: try: d = json.loads\\(line\\) except: continue keys = ['event','slug','func','body','intent','total_tokens','duration','cached','applied','stubs'] print\\(' | '.join\\(f'{k}={d.get\\(k\\)}' for k in keys if k in d\\)\\)\")",
+      "Bash(OLLAMA_NUM_PREDICT=2048 autocoder heal --slug login)",
+      "Bash(tee /tmp/heal_apply.log)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('tests/steps/test_login.py'\\).read\\(\\)\\); print\\('parses cleanly'\\)\")"
     ]
   },
   "disabledMcpjsonServers": [
