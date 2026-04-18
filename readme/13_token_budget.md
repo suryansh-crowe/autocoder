@@ -18,7 +18,15 @@ under ~600 tokens of input.
 | 8. Persist     | `autocoder/registry/`               | 0 / 0                    |
 | **Per URL**    |                                     | **~750 in / ~300 out**   |
 
-Plan caches make a rerun on an unchanged page cost **0 tokens**.
+Optional heal stage (one LLM call per stub or per failure):
+
+| Mode                       | Tokens (in / out)    | When                          |
+|----------------------------|----------------------|-------------------------------|
+| `heal` (stub fill)         | ~250 / ~30           | One per `NotImplementedError` |
+| `heal --from-pytest` (failure) | ~400 / ~60–150  | One per failing test          |
+
+Plan + heal caches make a rerun on an unchanged page (or unchanged
+failure) cost **0 tokens**.
 
 ## What keeps the input small
 

@@ -18,6 +18,9 @@ manifest/
   extractions/<slug>.prev.json     previous run's extraction (for diffs)
   plans/<fixture>.pom.<fp>.json
   plans/<fixture>.feature.<tier_set>.<fp>.json
+  heals/<slug>.<key>.json           cached stub-heal suggestions
+  heals/<slug>.fail.<key>.json      cached failure-heal suggestions
+  heals/last-pytest.xml             JUnit XML from `heal --from-pytest`
   runs.log              newline-delimited JSON, one event per line
 ```
 

@@ -143,19 +143,20 @@ OLLAMA_ENDPOINT=http://localhost:11434
 OLLAMA_MODEL=phi4:14b
 OLLAMA_NUM_CTX=12288
 OLLAMA_TEMPERATURE=0.2
-OLLAMA_NUM_PREDICT=512
+OLLAMA_NUM_PREDICT=2048           # critical — 512 truncates feature plans mid-JSON
 OLLAMA_TIMEOUT_SECONDS=600
 ```
 
 Required port + runtime notes:
 
-- The container must publish `11434:11434` (host:container). If your
-  container was started without `-p 11434:11434`, recreate it:
+- Bind the container to **loopback only** so nothing on the LAN can
+  reach it: `-p 127.0.0.1:11434:11434`. If your container was
+  started with `-p 11434:11434` (binds 0.0.0.0), recreate it:
 
   ```bash
   docker rm -f autocoder-phi4
   docker run -d --name autocoder-phi4 --restart unless-stopped \
-    -p 11434:11434 \
+    -p 127.0.0.1:11434:11434 \
     -v autocoder-ollama-models:/root/.ollama \
     -e OLLAMA_NUM_THREAD=8 -e OLLAMA_KEEP_ALIVE=30m \
     ollama/ollama:latest
@@ -220,8 +221,25 @@ Ollama. It is intentionally thin:
 
 ## Prompts
 
-`autocoder/llm/prompts.py` exposes two system prompts and two user
-prompt builders. Both are short, structured, and contain no examples.
+There are four prompt families across the codebase. All return a
+single JSON object; all are short and contain no few-shot examples.
+
+* `autocoder/llm/prompts.py:POM_SYSTEM` — POM-plan prompt (stage 4).
+* `autocoder/llm/prompts.py:FEATURE_SYSTEM` — feature-plan prompt
+  (stage 6).
+* `autocoder/heal/prompts.py:HEAL_SYSTEM` — fill a single
+  `NotImplementedError` stub (`autocoder heal`).
+* `autocoder/heal/prompts.py:FAILURE_HEAL_SYSTEM` — revise a step
+  body whose pytest run failed (`autocoder heal --from-pytest`).
+  The envelope carries the step text + current body + Playwright
+  error + a heuristic `failure_class` so the model can reason
+  about disabled buttons, modal interception, wrong-kind widgets,
+  and missing prerequisites.
+
+Both heal prompts share the same validator
+(`autocoder/heal/validator.py`); the failure-heal path opts in to
+`max_statements=5` so a fix like
+`pom.locate('agreement').check(); pom.click_submit()` is allowed.
 
 ### POM plan (stage 4)
 

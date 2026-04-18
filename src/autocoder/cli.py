@@ -242,14 +242,38 @@ def extend(
 @cli.command("heal")
 @click.option("--slug", default=None, help="Restrict heal to a single URL's step file (test_<slug>.py).")
 @click.option("--dry-run", is_flag=True, help="Show what would change without writing files.")
-@click.option("--force", is_flag=True, help="Ignore the heal cache and re-call the LLM for every stub.")
-def heal(slug: str | None, dry_run: bool, force: bool) -> None:
-    """Auto-fill `NotImplementedError` step stubs via the local LLM.
+@click.option("--force", is_flag=True, help="Ignore the heal cache and re-call the LLM for every target.")
+@click.option(
+    "--from-pytest",
+    is_flag=True,
+    help="Run pytest first; heal step bodies whose test failed at runtime "
+    "(uses the failure's error message as extra context).",
+)
+@click.option(
+    "--junit-xml",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Heal from an existing JUnit-XML report instead of running pytest "
+    "(`pytest --junit-xml=PATH` produces this).",
+)
+def heal(
+    slug: str | None,
+    dry_run: bool,
+    force: bool,
+    from_pytest: bool,
+    junit_xml: Path | None,
+) -> None:
+    """Auto-fix step bodies via the local LLM.
 
-    Scans `tests/steps/test_*.py` for stubs the renderer left behind,
-    asks the LLM for a single-statement body per stub, validates it
-    against the POM's real method list, and writes it back.
-    Safe to re-run: cached on disk by `(slug, step_text, fingerprint)`.
+    Two modes:
+
+    * default — fill `NotImplementedError` stubs the renderer left.
+    * `--from-pytest` / `--junit-xml` — heal step bodies whose tests
+      failed at runtime, with the Playwright error as context.
+
+    Both modes validate suggestions against the POM's real method
+    list and cache results so reruns spend zero tokens unless
+    something actually changed.
     """
     settings = load_settings()
     logger.init(settings.paths.runs_log, level=settings.log_level)
@@ -259,9 +283,17 @@ def heal(slug: str | None, dry_run: bool, force: bool) -> None:
         slug=slug or "*",
         dry_run=dry_run,
         force=force,
+        from_pytest=from_pytest or junit_xml is not None,
         log_level=settings.log_level,
     )
-    results = heal_steps(settings, HealOptions(slug=slug, dry_run=dry_run, force=force))
+    opts = HealOptions(
+        slug=slug,
+        dry_run=dry_run,
+        force=force,
+        from_pytest=from_pytest,
+        junit_path=junit_xml,
+    )
+    results = heal_steps(settings, opts)
     _print_heal_results(results, dry_run=dry_run)
     logger.ok(
         "cli_done",

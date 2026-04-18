@@ -2,7 +2,21 @@
 
 The generated suite is plain pytest + pytest-bdd + Playwright. Anything
 you can do in those tools, you can do here. The orchestrator only
-touches the suite when you ask it to (re)generate.
+touches the suite when you ask it to (re)generate or heal.
+
+## Generation → heal → run loop
+
+```bash
+autocoder generate <urls>          # 1. generate POMs / features / steps
+autocoder heal --slug <slug>       # 2. fill NotImplementedError stubs
+pytest tests/steps/test_<slug>.py  # 3. run the suite
+autocoder heal --from-pytest --slug <slug>  # 4. heal runtime failures
+pytest tests/steps/test_<slug>.py  # 5. re-run; repeat 4-5 if needed
+```
+
+Step 4 captures every Playwright error and asks the LLM for a
+revised step body (with `failure_class` hints — disabled / modal /
+wrong-kind / locator-not-found / timeout). See `17_heal.md`.
 
 ## First run after generation
 

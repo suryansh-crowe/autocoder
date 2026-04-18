@@ -53,18 +53,44 @@ def _role(handle: ElementHandle) -> str | None:
     if role:
         return role
     tag = (handle.evaluate("el => el.tagName") or "").lower()
-    return {
-        "button": "button",
-        "a": "link",
-        "input": "textbox",
-        "textarea": "textbox",
-        "select": "combobox",
-        "h1": "heading",
-        "h2": "heading",
-        "h3": "heading",
-        "h4": "heading",
-        "img": "image",
-    }.get(tag)
+    if tag == "input":
+        # `<input>` covers ~25 widget types — checkbox, radio, submit,
+        # button, range, color, file, etc. Mapping all of them to
+        # 'textbox' caused the renderer to emit `fill()` on checkboxes
+        # and lose the right Playwright primitive entirely.
+        input_type = (_attr(handle, "type") or "text").lower()
+        return _ROLE_BY_INPUT_TYPE.get(input_type, "textbox")
+    return _ROLE_BY_TAG.get(tag)
+
+
+# `<input type=X>` → ARIA-equivalent role used by the rest of the system.
+# Anything not listed falls through to 'textbox' (the safe default for
+# free-text inputs: text, email, password, search, tel, url, etc.).
+_ROLE_BY_INPUT_TYPE: dict[str, str] = {
+    "checkbox": "checkbox",
+    "radio": "radio",
+    "submit": "button",
+    "button": "button",
+    "reset": "button",
+    "image": "button",
+    "range": "slider",
+    "file": "button",
+    "color": "textbox",
+    "hidden": "textbox",  # filtered out at extraction time anyway
+}
+
+
+_ROLE_BY_TAG: dict[str, str] = {
+    "button": "button",
+    "a": "link",
+    "textarea": "textbox",
+    "select": "combobox",
+    "h1": "heading",
+    "h2": "heading",
+    "h3": "heading",
+    "h4": "heading",
+    "img": "image",
+}
 
 
 def _accessible_name(handle: ElementHandle) -> str | None:

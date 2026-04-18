@@ -54,6 +54,14 @@ autocoder/                        Project root (= the "autocoder" project)
         steps.py                    Render tests/steps/test_<slug>.py
         auth_setup.py               Render tests/auth_setup/test_auth_setup.py
 
+      heal/                       Optional stage 9: LLM-backed step healing
+        scanner.py                  Find renderer-shaped NotImplementedError stubs
+        prompts.py                  Stub-heal + failure-heal prompts
+        validator.py                AST-validate suggestions (1 stmt for stubs, ≤5 for failures)
+        applier.py                  Line-replace; re-parse to roll back on broken output
+        pytest_failures.py          Run pytest, parse JUnit XML, classify failures
+        runner.py                   Orchestrate heal: scan, LLM, validate, apply, cache
+
       registry/                   Stage 8: persistence + change detection
         store.py                    Read/write manifest/registry.yaml
         diff.py                     Detect element/selector changes per URL
@@ -76,10 +84,13 @@ autocoder/                        Project root (= the "autocoder" project)
   manifest/                       Runtime data (created on first run; gitignored)
     registry.yaml                   Source of truth: URL → URLNode + AuthSpec
     extractions/                    Per-URL compact extraction snapshots (JSON)
-    plans/                          Cached LLM JSON plans (skip on rerun)
+    plans/                          Cached LLM POM/feature plans (skip on rerun)
+    heals/                          Cached heal suggestions (stub + failure)
     runs.log                        Newline-delimited JSON run log
 
   readme/                         This documentation set
+  scripts/
+    verify_local_llm.py             Live test: prove inference is local-only
 ```
 
 ## On the two halves with similar names
@@ -106,5 +117,9 @@ that is the user-facing path in `.env` and CLI output.
 | Plan caching | `autocoder/llm/plans.py` | Keyed by extraction fingerprint; reruns of unchanged pages cost zero tokens. |
 | Code generation | `autocoder/generate/*.py` | Templates only; never invokes the LLM. |
 | Persistence | `autocoder/registry/store.py` | Single Python entry point for `manifest/registry.yaml`. |
-| Pipeline glue | `autocoder/orchestrator.py` | The only module that knows about all stages. |
-| User-facing commands | `autocoder/cli.py` | Thin layer over `orchestrator.py`. |
+| Stub healing | `autocoder/heal/runner.py` | Fills `NotImplementedError` stubs the renderer left. |
+| Failure healing | `autocoder/heal/runner.py` + `pytest_failures.py` | Runs pytest, parses JUnit XML, asks the LLM for revised step bodies. |
+| URL source resolution | `autocoder/intake/sources.py` | 4-tier fallback (CLI > file > env > settings); structure-aware splitting. |
+| Local-only verification | `scripts/verify_local_llm.py` | Records every outbound TCP destination during a live `/api/chat`. |
+| Pipeline glue | `autocoder/orchestrator.py` | The only module that knows about all stages; per-URL exceptions are caught so one failure doesn't abort the run. |
+| User-facing commands | `autocoder/cli.py` | Thin layer over `orchestrator.py` + `heal/runner.py`. |

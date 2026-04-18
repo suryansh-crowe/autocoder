@@ -8,25 +8,32 @@ signal comes from a real Playwright probe.
 ## Where the URL list comes from
 
 `autocoder/intake/sources.py:resolve_urls(...)` is the single resolver
-used by both `generate` and `extend`. It checks three sources in
+used by both `generate` and `extend`. It checks **four** sources in
 priority order and uses the first non-empty one:
 
 | Priority | Source | How |
 |----------|--------|-----|
 | 1 | CLI positional args | `autocoder generate <url1> <url2> ...` |
 | 2 | `--urls-file <path>` | One URL per line. Blank lines and lines starting with `#` are ignored. |
-| 3 | `AUTOCODER_URLS` env var (in `.env`) | Comma- or newline-separated. Same comment / blank rules. |
+| 3 | `AUTOCODER_URLS` env var | Comma- or newline-separated. Same comment / blank rules. |
+| 4 | Settings fallback | `[LOGIN_URL, BASE_URL]` from `.env` (whichever are set). |
 
 Behaviour:
 
 - The chosen source is logged (`urls_source source=… count=…`) so you
   always know where the URL list came from.
+- **Splitting is structure-aware.** Newlines and `,http(s)://`
+  boundaries split the input. A comma inside a URL's query string
+  (`?fields=name,email,role`) is **not** treated as a separator —
+  the URL survives intact.
 - All entries are deduped while preserving order.
-- All entries are validated (must have an `http` or `https` scheme and
-  a host). Any failure reports the offending URL **and** the source
-  it came from — there is no silent fallback to a different source.
-- An empty result fails the CLI with the three-option usage hint
-  rather than running with zero URLs.
+- All entries are validated. `diagnose_url(url)` returns a one-line
+  reason per failure (missing scheme → suggests `https://...`,
+  unsupported scheme, missing host, parse error). The validator
+  includes that reason in the error message and refuses to fall
+  through to a lower-priority source.
+- An empty result from every source fails the CLI with a
+  four-option usage hint.
 
 `autocoder rerun` does not use this resolver — it always loads URLs
 straight from the registry. `autocoder extend` uses the resolver but

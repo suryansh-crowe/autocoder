@@ -64,8 +64,16 @@ def validate_body(
     *,
     fixture_name: str,
     pom_method_names: set[str],
+    max_statements: int = 1,
 ) -> tuple[str, list[str]]:
-    """Return (cleaned_body, errors). Empty errors → body is safe."""
+    """Return (cleaned_body, errors). Empty errors → body is safe.
+
+    ``max_statements`` controls how many top-level statements are
+    permitted. Stub heal (single statement is safe and unambiguous)
+    uses the default of 1; failure-driven heal uses 5 because
+    real-world fixes often need a prerequisite call before retrying
+    (`pom.check_box(); pom.click_submit()`).
+    """
     text = (body_text or "").strip()
     if not text:
         return "", ["empty body"]
@@ -75,31 +83,34 @@ def validate_body(
     except SyntaxError as exc:
         return "", [f"syntax error: {exc.msg}"]
 
-    if len(tree.body) != 1:
-        return "", [f"expected exactly one statement, got {len(tree.body)}"]
-    stmt = tree.body[0]
-    if not isinstance(stmt, _ALLOWED_STMT_TYPES):
-        return "", [f"forbidden top-level node {type(stmt).__name__}"]
+    if not tree.body:
+        return "", ["empty body"]
+    if len(tree.body) > max_statements:
+        return "", [f"too many statements: got {len(tree.body)}, max {max_statements}"]
 
-    illegal = _illegal_constructs(stmt)
-    if illegal:
-        return "", [f"forbidden construct(s): {', '.join(sorted(set(illegal)))}"]
+    for stmt in tree.body:
+        if not isinstance(stmt, _ALLOWED_STMT_TYPES):
+            return "", [f"forbidden top-level node {type(stmt).__name__}"]
+        illegal = _illegal_constructs(stmt)
+        if illegal:
+            return "", [f"forbidden construct(s): {', '.join(sorted(set(illegal)))}"]
 
     # Any `<fixture>.<method>(...)` call where the object is the POM
     # fixture must reference a real method, `navigate`, `locate`, or
     # `page`. Other fixtures (e.g. `expect(...)`) are fine — they're
     # global names from the import header.
     errors: list[str] = []
-    for call in _walk_calls(stmt):
-        target = call.func
-        if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
-            obj = target.value.id
-            attr = target.attr
-            if obj == fixture_name and attr not in pom_method_names and attr not in _BUILTIN_FIXTURE_ATTRS:
-                errors.append(
-                    f"unknown method {fixture_name}.{attr}() — "
-                    f"must be in pom_methods or a BasePage attribute"
-                )
+    for stmt in tree.body:
+        for call in _walk_calls(stmt):
+            target = call.func
+            if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+                obj = target.value.id
+                attr = target.attr
+                if obj == fixture_name and attr not in pom_method_names and attr not in _BUILTIN_FIXTURE_ATTRS:
+                    errors.append(
+                        f"unknown method {fixture_name}.{attr}() — "
+                        f"must be in pom_methods or a BasePage attribute"
+                    )
 
     if errors:
         return "", errors

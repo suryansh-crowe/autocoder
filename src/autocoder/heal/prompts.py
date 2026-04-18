@@ -1,9 +1,13 @@
 """Prompts for the heal stage.
 
-One LLM call per stub. Input is a tiny JSON envelope; output must be a
-single safe Python statement. The schema is enforced by
-``autocoder.heal.validator``; the prompt only nudges the model toward
-the validator's accept set.
+Two prompt builders share the same JSON-only output contract:
+
+* :func:`build_heal_prompt` — for un-implemented stubs the renderer
+  left behind. Tiny envelope, single Python statement out.
+* :func:`build_failure_heal_prompt` — for steps that *did* run but
+  failed at runtime. Same schema, but the envelope carries the
+  current body + the Playwright error so the model can reason
+  about prerequisites (disabled buttons, modals, wrong primitive).
 """
 
 from __future__ import annotations
@@ -60,5 +64,77 @@ def build_heal_prompt(
     }
     return (
         "Write the body for this Gherkin step.\n\n"
+        + json.dumps(payload, separators=(",", ":"))
+    )
+
+
+# ---------------------------------------------------------------------------
+# Failure-driven heal
+# ---------------------------------------------------------------------------
+
+
+FAILURE_HEAL_SYSTEM = """You are a step-implementation assistant for a Playwright pytest-bdd suite.
+A step ran and failed at runtime. Your job is to suggest a NEW body
+for the step function so the next run gets further.
+
+Output a single JSON object — no prose, no markdown.
+
+Schema:
+{
+  "body": "<one or more Python statements separated by '\\n'; max 5>",
+  "intent": "<one-line explanation, <= 80 chars>"
+}
+
+Allowed in each statement:
+- <fixture>.<method>(<args>)              # method MUST appear in pom_methods
+- <fixture>.locate('<id>').click() / .check() / .fill('value') / .press('Escape')
+- <fixture>.page.<playwright_method>(...)
+- expect(<fixture>.locate('<id>')).to_be_visible() / .to_be_enabled()
+- expect(<fixture>.page).to_have_url(...)
+- pass
+
+Hard rules:
+- ≤ 5 statements. No imports, defs, classes, with/for/while/try, lambdas.
+- Use ONLY method names from pom_methods, or .locate(...) / .page (BasePage).
+- Element ids must come from the elements catalog.
+
+Failure-class hints (the user supplies failure_class):
+- "disabled":     find an element that ENABLES the target (checkbox, toggle, prerequisite). Click/check it FIRST, then retry the original action.
+- "intercepted":  a modal or overlay is blocking. Press Escape, or click an element with name like "Close"/"Got it"/"Accept", then retry.
+- "wrong_kind":   the locator points at a different widget than expected. Replace `.fill()` with `.check()` for checkboxes, `.click()` for buttons. Use `.locate('<id>')` directly.
+- "locator_not_found" / "not_visible" / "not_attached": wait for the element first (`expect(...).to_be_visible()` then act), or pick a different element id from the catalog.
+- "timeout":      same as the underlying disabled / not-visible class — diagnose from the error_message.
+
+If nothing safe fits, output {"body": "pass", "intent": "no safe binding"}.
+"""
+
+
+def build_failure_heal_prompt(
+    *,
+    step_text: str,
+    current_body: str,
+    error_message: str,
+    failure_class: str,
+    keywords: Iterable[str],
+    pom_class: str,
+    fixture_name: str,
+    pom_methods: list[dict],
+    elements: list[dict],
+    page_url: str | None,
+) -> str:
+    payload = {
+        "step_text": step_text,
+        "current_body": current_body,
+        "error_message": error_message,
+        "failure_class": failure_class,
+        "keywords": list(keywords),
+        "pom_class": pom_class,
+        "pom_fixture": fixture_name,
+        "page_url": page_url or "",
+        "pom_methods": pom_methods,
+        "elements": elements,
+    }
+    return (
+        "Suggest a revised body for this failing step.\n\n"
         + json.dumps(payload, separators=(",", ":"))
     )

@@ -117,15 +117,24 @@ def _the_dashboard_is_visible(login_page: LoginPage) -> None:
 
 Generation rules:
 
-- One `@given` / `@when` / `@then` per **unique** step text. Repeated
-  text across scenarios shares a definition.
-- If the validated step has a `pom_method`, the body calls
-  `fixture.<pom_method>(...args)`.
-- If it does not (e.g. an assertion the LLM could not map), the body
-  raises `NotImplementedError("Implement step: …")`. The step never
-  silently passes.
-- Quoted segments inside step text become `parsers.parse` arguments
-  (`"foo"` → `arg0`).
+- One Python function per **unique** step text — same text under
+  multiple keywords stacks decorators on the same function (no
+  duplicate function names). `And` / `But` keywords inherit the
+  previous step's keyword as Gherkin specifies.
+- If the validated step has a `pom_method` AND the step text
+  supplies values for every parameter the method requires, the
+  body calls `fixture.<pom_method>(...args)`.
+- If the step has a `pom_method` but supplies no values for a
+  required parameter, the body raises
+  `NotImplementedError("...expects: <param>")` instead of emitting
+  a broken call.
+- If the step has no `pom_method` at all, the body raises
+  `NotImplementedError("Implement step: …")`. Either way the step
+  never silently passes.
+- Quoted segments inside step text become `parsers.parse`
+  arguments (`"foo"` → `arg0`).
+- The remaining stubs are filled in by the **heal stage**
+  (`autocoder heal`). See `17_heal.md`.
 
 ## Auth setup render
 

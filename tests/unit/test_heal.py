@@ -204,7 +204,8 @@ def test_validator_rejects_multi_statement() -> None:
         fixture_name=_FX,
         pom_method_names=_METHODS,
     )
-    assert any("expected exactly one statement" in e for e in errs)
+    # Default max_statements=1; the failure mode opts in to higher caps.
+    assert any("too many statements" in e for e in errs)
 
 
 def test_validator_rejects_import() -> None:

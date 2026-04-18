@@ -91,8 +91,14 @@ events when you want to know "why?":
 | `rerun_unchanged`             | Why an already-complete URL was skipped.    |
 | `pom_plan_cache_hit` / `_miss` | Why a stage spent or saved LLM tokens.     |
 | `pom_written` / `feature_written` / `steps_written` | `action=created` vs. `action=updated`, plus counts. |
-| `urls_source`                 | Which URL source the CLI used (`cli` / `file:…` / `env`). |
+| `urls_source`                 | Which URL source the CLI used (`cli` / `file:…` / `env` / `settings`). |
 | `url_skipped`                 | Why an in-order URL was skipped (e.g. `login_url_covered_by_auth_setup`). |
+| `url_failed`                  | A URL's processing raised; logged with `err_type` so the run keeps going. |
+| `heal_context_loaded`         | Per-slug POM methods + element catalog the heal LLM will see. |
+| `heal_dry_run` / `heal_applied` | What the LLM proposed and whether it was written. |
+| `heal_invalid_body`           | Why a suggestion was rejected (validator reason). |
+| `heal_apply_failed`           | Generated source did not re-parse; original kept untouched. |
+| `heal_pytest_run` / `heal_failures_collected` | `--from-pytest` invocation + parsed failure count. |
 
 ## Stage markers
 

@@ -53,18 +53,34 @@ two planning calls. Everything else is deterministic Python.
 
 ## Capabilities the system supports
 
-- URL intake and classification (public / authenticated /
-  redirect-to-login / login).
-- Dependency mapping between URLs (login first, redirect targets
+- URL intake from four sources (CLI args > `--urls-file` >
+  `AUTOCODER_URLS` env > `[LOGIN_URL, BASE_URL]` from `.env`),
+  with structure-aware splitting that preserves URLs whose query
+  strings contain commas.
+- URL classification (public / authenticated / redirect-to-login /
+  login) and dependency mapping (login first, redirect targets
   before sources).
 - Auth-first generation: an `auth_setup` test is rendered before
   protected pages are explored.
-- DOM/UI extraction limited to interactive elements.
-- Stable selector discovery with fallbacks.
+- DOM/UI extraction limited to interactive elements; element kind
+  honours `<input type=...>` so checkboxes/radios/submits get the
+  right Playwright primitive.
+- Stable selector discovery with up to four fallbacks per element.
 - POM creation/update with selector dictionaries kept in one place.
 - BDD feature generation by tier (smoke / sanity / regression / etc).
-- Playwright step generation that calls POM methods.
-- Tracking and resume via `manifest/registry.yaml`.
-- Rerun awareness: extractions are fingerprinted; identical pages
-  skip the LLM entirely.
+- Playwright step generation that calls POM methods, with explicit
+  `NotImplementedError` stubs for steps that cannot be safely bound.
+- **Heal stage** (`autocoder heal`) — fills the stubs via the LLM
+  with AST-validated single-statement bodies.
+- **Runtime-failure heal** (`autocoder heal --from-pytest`) — runs
+  pytest, captures Playwright errors, asks the LLM for revised
+  bodies (up to 5 statements so prerequisites are expressible).
+- Tracking and resume via `manifest/registry.yaml`. Per-URL
+  failures don't abort the whole run — failed URLs are marked and
+  the loop continues.
+- Rerun awareness: extractions and plans are fingerprinted;
+  unchanged pages skip the LLM entirely.
 - Coverage extension on existing URLs without duplicating scenarios.
+- Local-only verification: `python scripts/verify_local_llm.py`
+  records every outbound TCP destination during a real `/api/chat`
+  and asserts loopback / private-network only.

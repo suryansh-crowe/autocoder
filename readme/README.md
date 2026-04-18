@@ -4,7 +4,9 @@ URL-driven Playwright BDD test automation built around a local Phi-4 14B
 LLM. The orchestrator turns a list of URLs into a runnable pytest-bdd
 suite — POMs, features, step definitions, and an auth-setup test —
 while keeping the LLM's role to a single tiny JSON action plan per
-stage.
+stage. A separate `heal` stage fills in step bodies the renderer
+couldn't bind, and `heal --from-pytest` revises step bodies whose
+tests fail at runtime.
 
 ## Reading order
 
@@ -17,18 +19,18 @@ finish in a few minutes.
 | 02 | [quickstart.md](02_quickstart.md) | Install, env, first generation, first test run |
 | 03 | [architecture.md](03_architecture.md) | Package layout + component responsibilities |
 | 04 | [pipeline.md](04_pipeline.md) | The end-to-end flow diagram, stage by stage |
-| 05 | [url_intake.md](05_url_intake.md) | URL classification + dependency graph |
+| 05 | [url_intake.md](05_url_intake.md) | URL sources, classification, dependency graph |
 | 06 | [auth_first.md](06_auth_first.md) | Auth-first handling, secret rules, storage_state |
 | 07 | [extraction.md](07_extraction.md) | Browser inspection + page fingerprint |
 | 08 | [selectors_and_self_healing.md](08_selectors_and_self_healing.md) | Selector priority, runtime self-heal |
 | 09 | [llm.md](09_llm.md) | Ollama / Phi-4 client, prompts, plan validation, cache |
 | 10 | [generation.md](10_generation.md) | Deterministic renderers (POM / feature / steps / auth) |
-| 11 | [manifest.md](11_manifest.md) | Registry, runs log, resume, rerun, extension |
+| 11 | [manifest.md](11_manifest.md) | Registry, runs log, plans + heals caches, resume, rerun |
 | 12 | [running_tests.md](12_running_tests.md) | Running the generated suite (pytest, tiers, markers) |
 | 13 | [token_budget.md](13_token_budget.md) | Token cost per stage + why it stays low |
 | 14 | [extending.md](14_extending.md) | Adding selector strategies, tiers, or models |
 | 15 | [logging.md](15_logging.md) | Log levels, token accounting, decision events, redaction rules |
-| 17 | [heal.md](17_heal.md) | `autocoder heal` — auto-fill `NotImplementedError` stubs via the LLM |
+| 17 | [heal.md](17_heal.md) | `autocoder heal` — fill stubs + heal runtime test failures |
 
 ## Run reports
 

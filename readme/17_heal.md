@@ -1,16 +1,21 @@
-# 17 · Heal — auto-fill step stubs via the local LLM
+# 17 · Heal — fill stubs and revise failing step bodies via the LLM
 
-The renderer never silently passes a step it could not bind to a POM
-method — it leaves an explicit
-`raise NotImplementedError("Implement step: …")` stub. After you run
-the suite once and see what's missing, run **`autocoder heal`** to
-fill those stubs in via Phi-4.
+`autocoder heal` runs in two modes against your generated step
+files. Both validate the LLM's suggestions against the POM's real
+method list before writing anything.
+
+| Mode | Command | What it heals |
+|------|---------|---------------|
+| **Stub heal** (default) | `autocoder heal` | `raise NotImplementedError("Implement step: …")` bodies the renderer left when it couldn't bind a step. |
+| **Failure heal** | `autocoder heal --from-pytest` | Step bodies whose pytest run failed at runtime. Reads the Playwright error and asks the LLM for a revised body. |
+
+Common flags:
 
 ```bash
-autocoder heal             # heal every stub in tests/steps/
-autocoder heal --slug login         # restrict to test_login.py
-autocoder heal --dry-run            # preview suggestions; do not write
-autocoder heal --force              # bypass cache; re-call the LLM
+autocoder heal --slug login           # restrict to test_login.py
+autocoder heal --dry-run              # preview suggestions; do not write
+autocoder heal --force                # bypass cache; re-call the LLM
+autocoder heal --junit-xml report.xml # heal from an existing JUnit report
 ```
 
 ## What it does
@@ -93,20 +98,48 @@ Stage-level events: `heal_start`, `heal_context_loaded` per slug,
 `heal_applied` / `heal_dry_run` / `heal_invalid_body` per stub,
 `heal_done` at the end.
 
+## Failure-heal mode (`--from-pytest`)
+
+Runs pytest with `--junit-xml=manifest/heals/last-pytest.xml`,
+parses the XML, and for every failure builds a richer prompt:
+
+| Field sent to LLM | Source |
+|-------------------|--------|
+| `step_text`       | `parsers.parse(...)` decorator on the failing step |
+| `current_body`    | The body that just failed |
+| `error_message`   | Playwright's first line (e.g. `Locator.click: Timeout 30000ms exceeded`) |
+| `failure_class`   | Heuristic: `disabled` / `intercepted` / `wrong_kind` / `not_visible` / `not_attached` / `locator_not_found` / `timeout` / `other` |
+| `pom_methods` + `elements` + `page_url` | Same context the stub-heal prompt uses |
+
+The validator runs with `max_statements=5` so the model can suggest
+a prerequisite + the original action in one body, e.g.:
+
+```python
+login_page.locate('agreement').check()
+login_page.click_sign_in_with_microsoft()
+```
+
+Cache key is `(slug, step_text, failure_class, error_message,
+fingerprint)` — a different failure on the same step is treated as
+a fresh problem, but identical failures on rerun are free.
+
 ## Safety guarantees
 
-- **Hand edits survive.** Anything that isn't the renderer's exact
-  stub shape is skipped.
+- **Hand edits survive.** Stub heal only touches the renderer's
+  exact 1-statement `raise NotImplementedError("Implement step: …")`
+  shape. Failure heal only targets the function names that pytest
+  reported as failing, and only after the body has been validated.
 - **No unsafe code is ever written.** The validator rejects
   imports, function/class definitions, lambdas, comprehensions,
-  multi-statement bodies, syntax errors, and any reference to a
-  POM method that doesn't actually exist.
+  syntax errors, and any reference to a POM method that doesn't
+  actually exist. Stub heal allows 1 statement; failure heal allows
+  ≤ 5 — every statement is checked.
 - **No partial writes.** If the rewritten file does not re-parse,
   the original file is left untouched (the applier raises before
   any disk write).
-- **No secrets in suggestions.** The heal prompt only ships the
-  step text + POM method names + element catalog — the same
-  redaction rules as `readme/15_logging.md` apply.
+- **No secrets in suggestions.** The heal prompts only ship step
+  text + POM method names + element catalog + (for failure heal)
+  the Playwright error message — never `.env` values.
 
 ## CLI options
 
@@ -114,4 +147,6 @@ Stage-level events: `heal_start`, `heal_context_loaded` per slug,
 |------|---------|
 | `--slug <name>` | Restrict to `tests/steps/test_<slug>.py` only. |
 | `--dry-run` | Show suggestions in the result table; do not write any file. |
-| `--force` | Bypass the on-disk cache; re-call the LLM for every stub. |
+| `--force` | Bypass the on-disk cache; re-call the LLM for every target. |
+| `--from-pytest` | Run pytest first and heal whatever failed. |
+| `--junit-xml PATH` | Heal from an existing JUnit-XML report instead of running pytest. |

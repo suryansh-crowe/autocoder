@@ -117,6 +117,7 @@ is deterministic.
 | 7a. Feature    | `autocoder/generate/feature.py`     | 0                  | `tests/features/<slug>.feature` |
 | 7b. Steps      | `autocoder/generate/steps.py`       | 0                  | `tests/steps/test_<slug>.py` |
 | 8. Persist     | `autocoder/registry/`               | 0                  | `registry.yaml` + `runs.log` |
+| **9. Heal (optional)** | `autocoder/heal/`           | ~250 in / ~30 out per stub; ~400 / ~80 per failure | Step bodies in `tests/steps/test_<slug>.py` (stub fill or runtime-failure revision) |
 
 ## Resume / rerun in one paragraph
 
@@ -125,4 +126,7 @@ extraction whose fingerprint matches the previous run skips stages 4–7
 entirely (zero LLM calls). `autocoder generate --force` ignores caches
 and rebuilds every artifact. `autocoder extend --tier ...` adds new
 tiers to existing URLs without duplicating scenarios — the validator
-dedupes by scenario title. See `11_manifest.md` for the gory detail.
+dedupes by scenario title. A single URL's exception in stages 3–8
+is caught (status set to `failed`, registry saved) so the loop
+continues with the next URL. See `11_manifest.md` for the gory
+detail and `17_heal.md` for the heal stage.

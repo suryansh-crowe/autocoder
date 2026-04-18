@@ -34,26 +34,32 @@ _INTERACTIVE_SELECTOR = (
 
 
 def _kind_for(role: str | None, tag: str | None) -> str:
+    """Map (role, tag) to the catalog `kind` used by the planner.
+
+    Role wins over tag — that's how the LLM-facing label stays
+    consistent for `<input type=checkbox>` (role=checkbox via the
+    selectors module) vs a generic text `<input>` (role=textbox).
+    """
     role = (role or "").lower()
     tag = (tag or "").lower()
-    if role in {"button"} or tag == "button":
+    if role == "checkbox":
+        return "checkbox"
+    if role == "radio":
+        return "radio"
+    if role == "button" or tag == "button":
         return "button"
-    if role in {"link"} or tag == "a":
+    if role == "link" or tag == "a":
         return "link"
+    if role == "tab":
+        return "tab"
+    if role == "menuitem":
+        return "menuitem"
     if tag == "input":
         return "input"
     if tag == "textarea":
         return "textarea"
     if tag == "select" or role == "combobox":
         return "select"
-    if role == "checkbox":
-        return "checkbox"
-    if role == "radio":
-        return "radio"
-    if role == "tab":
-        return "tab"
-    if role == "menuitem":
-        return "menuitem"
     return "other"
 
 

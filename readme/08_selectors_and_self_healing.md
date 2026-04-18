@@ -25,6 +25,30 @@ you add or remove a strategy.
 Framework-generated ids (anything containing `:r`, `__react`, `mui-`,
 `chakra-`) are skipped automatically — they shift between renders.
 
+## Element role resolution
+
+`_role()` in `selectors.py` and `_kind_for()` in `inspector.py`
+together decide what kind of widget each element is, which drives
+which Playwright primitive the renderer emits (`click`, `fill`,
+`check`, `select`, …). Two rules:
+
+1. An explicit `role="..."` attribute wins.
+2. Otherwise tag is mapped, **except** that `<input>` is mapped via
+   `type=`:
+
+   | `<input type=...>` | role | resulting `kind` | POM action |
+   |--------------------|------|------------------|-----------|
+   | `checkbox`         | `checkbox` | `checkbox` | `.check()` |
+   | `radio`            | `radio` | `radio` | `.check()` |
+   | `submit` / `button` / `reset` / `image` | `button` | `button` | `.click()` |
+   | `range`            | `slider` | `other` | (manual) |
+   | `text` / `email` / `password` / etc. | `textbox` | `input` | `.fill(value)` |
+
+   Without this, `<input type=checkbox>` was previously labelled
+   `kind=input` and the renderer emitted `.fill('value')` on it,
+   which Playwright rejects with `Input of type "checkbox" cannot
+   be filled`.
+
 ## Generation-time output
 
 `build_selector(handle)` returns `(primary, fallbacks)` where:

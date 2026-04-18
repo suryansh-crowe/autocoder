@@ -45,8 +45,26 @@ source of priority at runtime.
 Change `OLLAMA_MODEL` in `.env`. Nothing else is required as long as
 the model can return clean JSON in `format=json` mode. For non-Ollama
 backends, write a sibling of `autocoder/llm/ollama_client.py` that
-exposes the same `chat_json(system, user)` signature and select it in
-`autocoder/llm/plans.py`.
+exposes the same `chat_json(system, user, purpose=...)` signature
+and select it in `autocoder/llm/plans.py` and
+`autocoder/heal/runner.py`.
+
+## Allow a new heal pattern
+
+`autocoder/heal/validator.py` controls what the LLM is allowed to
+emit as a step body. To accept a new pattern (e.g. a Playwright
+primitive that's not yet on the allow-list):
+
+1. Update `_BUILTIN_FIXTURE_ATTRS` if the new pattern adds a
+   first-party method on the POM fixture surface.
+2. Add the example to `HEAL_SYSTEM` / `FAILURE_HEAL_SYSTEM` so the
+   model knows it's available.
+3. Add a unit test in `tests/unit/test_heal.py` (stub heal) or
+   `tests/unit/test_heal_failures.py` (failure heal).
+
+To recognise a new pytest failure shape, add a row to
+`_FAILURE_PATTERNS` in `autocoder/heal/pytest_failures.py` and a
+matching hint in `FAILURE_HEAL_SYSTEM`.
 
 ## Add a new orchestrator stage
 

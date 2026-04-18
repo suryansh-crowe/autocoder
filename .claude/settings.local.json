@@ -37,7 +37,15 @@
       "Bash(python -c \" import sys, json for line in sys.stdin: try: d = json.loads\\(line\\) except: continue keys = ['event','slug','func','body','intent','total_tokens','duration','cached','applied','stubs'] print\\(' | '.join\\(f'{k}={d.get\\(k\\)}' for k in keys if k in d\\)\\)\")",
       "Bash(OLLAMA_NUM_PREDICT=2048 autocoder heal --slug login)",
       "Bash(tee /tmp/heal_apply.log)",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('tests/steps/test_login.py'\\).read\\(\\)\\); print\\('parses cleanly'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('tests/steps/test_login.py'\\).read\\(\\)\\); print\\('parses cleanly'\\)\")",
+      "Bash(python -m pytest tests/unit/test_heal_failures.py::test_parse_junit_xml_extracts_failures tests/unit/test_heal_failures.py::test_parse_junit_xml_takes_deepest_step_function tests/unit/test_heal.py::test_validator_rejects_multi_statement -v)",
+      "Bash(python -m pytest tests/unit/test_heal_failures.py -v)",
+      "Bash(python -c \" import os from dotenv import load_dotenv load_dotenv\\('.env'\\) ai_keys = ['OLLAMA_ENDPOINT','OLLAMA_MODEL','OLLAMA_NUM_CTX','OLLAMA_TEMPERATURE','OLLAMA_NUM_PREDICT','OLLAMA_TIMEOUT_SECONDS','OLLAMA_TOP_P', 'OPENAI_API_KEY','OPENAI_BASE_URL','ANTHROPIC_API_KEY','GOOGLE_API_KEY','HF_TOKEN','HUGGINGFACE_TOKEN','COHERE_API_KEY','REPLICATE_API_TOKEN', 'AZURE_OPENAI_API_KEY','AZURE_OPENAI_ENDPOINT','LITELLM_PROXY','LANGSMITH_API_KEY','LANGFUSE_PUBLIC_KEY'] for k in ai_keys: v = os.environ.get\\(k, ''\\) print\\(f' {k:30s} present={bool\\(v.strip\\(\\)\\)}', end=''\\) if k.startswith\\('OLLAMA_ENDPOINT'\\) and v: print\\(f' value={v}', end=''\\) elif k.startswith\\('OLLAMA_MODEL'\\) and v: print\\(f' value={v}', end=''\\) print\\(\\)\")",
+      "Bash(powershell -NoProfile -Command \"Get-NetTCPConnection -LocalPort 11434 -State Listen -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,State,OwningProcess | Format-Table -AutoSize\")",
+      "Bash(python -c \"import sys, json; d=json.loads\\(sys.stdin.read\\(\\)\\); [print\\(f'  {k} -> {v}'\\) for k,v in d.items\\(\\)]\")",
+      "Bash(python scripts/verify_local_llm.py)",
+      "Bash(tee /tmp/verify.log)",
+      "Bash(tee /tmp/verify2.log)"
     ]
   },
   "disabledMcpjsonServers": [
