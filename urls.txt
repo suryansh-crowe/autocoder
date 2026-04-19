@@ -1,0 +1,12 @@
+# URLs for `autocoder run --urls-file urls.txt`.
+# One URL per line. Blank lines and `#` comments are ignored.
+# Auth-first runs automatically because LOGIN_URL is set in .env.
+
+https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/home
+https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/stewie
+https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/catalog
+https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/source-connection
+https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/dq/insights
+https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/sources
+https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/agent
+https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/security

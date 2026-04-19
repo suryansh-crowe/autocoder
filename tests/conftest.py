@@ -7,6 +7,19 @@ Two distinct ``page`` fixtures are exposed:
 * ``raw_page``  — fresh context with no storage_state. Use it for
                   the auth-setup test or any explicitly-anonymous
                   scenario.
+
+The module also bridges two env vars from ``.env`` into the
+``pytest-playwright`` plugin so the autocoder side and the pytest
+side stay in sync:
+
+* ``HEADLESS``                 -> browser launch headed/headless mode
+* ``PW_SLOWMO_MS``             -> per-action slow-motion delay in ms
+                                  (useful when ``HEADLESS=false`` so
+                                  you can watch the flow)
+
+Priority: an explicit ``pytest --headed`` / ``--headless`` flag
+always wins over the env var. This lets CI override ``.env``
+without editing files.
 """
 
 from __future__ import annotations
@@ -17,6 +30,21 @@ from typing import Iterator
 
 import pytest
 from playwright.sync_api import Browser, BrowserContext, Page
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "")
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 
 def _storage_state_path() -> Path:
@@ -30,6 +58,30 @@ def _storage_state_path() -> Path:
 @pytest.fixture(scope="session")
 def base_url() -> str:
     return os.environ.get("BASE_URL", "").rstrip("/")
+
+
+@pytest.fixture(scope="session")
+def browser_type_launch_args(browser_type_launch_args):  # noqa: F811
+    """Bridge ``HEADLESS`` and ``PW_SLOWMO_MS`` from .env into pytest-playwright.
+
+    By default ``pytest-playwright`` only honours its own ``--headed``
+    flag — it does **not** read the ``HEADLESS`` env var. That's why
+    ``pytest tests/steps`` is silent even when ``.env`` has
+    ``HEADLESS=false``. This fixture closes that gap.
+
+    An explicit ``--headed`` / ``--headless`` CLI flag still wins,
+    because those flags mutate ``browser_type_launch_args`` before
+    this fixture runs.
+    """
+    args = dict(browser_type_launch_args)
+    # Respect CLI overrides: if the key was set by --headed/--headless
+    # handling upstream, leave it alone.
+    if "headless" not in browser_type_launch_args:
+        args["headless"] = _env_flag("HEADLESS", True)
+    slowmo = _env_int("PW_SLOWMO_MS", 0)
+    if slowmo > 0 and "slow_mo" not in browser_type_launch_args:
+        args["slow_mo"] = slowmo
+    return args
 
 
 @pytest.fixture
