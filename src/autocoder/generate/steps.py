@@ -293,6 +293,20 @@ def _body(
     pom_args_by_method: dict[str, list[str]],
     elements: list[Element],
 ) -> str:
+    # Background / navigation hygiene: ``Given I am on the X page`` is
+    # almost always a setup step that should actually load the page,
+    # not click a nav link the LLM happened to map it to. The
+    # feature-plan LLM routinely picks the nearest-sounding ``click_home``
+    # / ``click_dashboard`` method here, which then fails at runtime
+    # because no URL was loaded yet (the page is still ``about:blank``).
+    #
+    # Force ``fixture.navigate()`` for Given steps that match the
+    # navigation regex, regardless of what the LLM bound. ``navigate``
+    # is defined on every generated POM (it inherits from BasePage),
+    # so this is always a safe call.
+    if step.keyword == "Given" and _NAV_PATTERN.search(step.text or ""):
+        return f"{fixture_name}.navigate()"
+
     if step.pom_method:
         required = pom_args_by_method.get(step.pom_method, [])
         supplied = list(extracted_args) + list(step.args or [])
