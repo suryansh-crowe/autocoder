@@ -64,6 +64,7 @@ def validate_body(
     *,
     fixture_name: str,
     pom_method_names: set[str],
+    element_ids: set[str] | None = None,
     max_statements: int = 1,
 ) -> tuple[str, list[str]]:
     """Return (cleaned_body, errors). Empty errors → body is safe.
@@ -73,6 +74,15 @@ def validate_body(
     uses the default of 1; failure-driven heal uses 5 because
     real-world fixes often need a prerequisite call before retrying
     (`pom.check_box(); pom.click_submit()`).
+
+    ``element_ids`` is the set of keys present in the POM's
+    ``SELECTORS`` dict. When provided, any string literal passed to
+    ``<fixture>.locate(...)`` / ``<fixture>.click(...)`` /
+    ``<fixture>.check(...)`` / ``<fixture>.fill(...)`` /
+    ``<fixture>.select(...)`` is rejected if it is not a known key.
+    This guards against the LLM inventing element ids like
+    ``"title"`` / ``"response"`` / ``"validation-error-message"``
+    that would explode at runtime with ``KeyError``.
     """
     text = (body_text or "").strip()
     if not text:
@@ -99,7 +109,12 @@ def validate_body(
     # fixture must reference a real method, `navigate`, `locate`, or
     # `page`. Other fixtures (e.g. `expect(...)`) are fine — they're
     # global names from the import header.
+    #
+    # We also reject string arguments to ``locate``/``click``/``check``/
+    # ``fill``/``select`` that do not appear in the POM's SELECTORS
+    # catalogue, because those crash at runtime with KeyError.
     errors: list[str] = []
+    element_lookups = {"locate", "click", "check", "fill", "select"}
     for stmt in tree.body:
         for call in _walk_calls(stmt):
             target = call.func
@@ -111,6 +126,22 @@ def validate_body(
                         f"unknown method {fixture_name}.{attr}() — "
                         f"must be in pom_methods or a BasePage attribute"
                     )
+                    continue
+                if (
+                    element_ids is not None
+                    and obj == fixture_name
+                    and attr in element_lookups
+                    and call.args
+                ):
+                    first = call.args[0]
+                    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                        if first.value not in element_ids:
+                            errors.append(
+                                f"unknown element_id {first.value!r} passed to "
+                                f"{fixture_name}.{attr}(...) — must be one of "
+                                f"the keys in SELECTORS ({sorted(element_ids)[:6]}"
+                                f"{'...' if len(element_ids) > 6 else ''})"
+                            )
 
     if errors:
         return "", errors

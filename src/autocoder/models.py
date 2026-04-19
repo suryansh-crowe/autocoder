@@ -38,8 +38,14 @@ class Status(str, Enum):
     POM_READY = "pom_ready"
     FEATURE_READY = "feature_ready"
     STEPS_READY = "steps_ready"
+    # Generation artifacts exist on disk but tests have not been run.
     COMPLETE = "complete"
+    # Generation + pytest pass (possibly after one or more heal attempts).
+    VERIFIED = "verified"
+    # Generation wrote everything, but at least one placeholder remains
+    # OR tests still fail after ``--max-heal-attempts``.
     NEEDS_IMPLEMENTATION = "needs_implementation"
+    # Stage 3+ raised; the URL did not produce a full artifact set.
     FAILED = "failed"
 
 
@@ -141,6 +147,11 @@ class URLNode(BaseModel):
     steps_path: str | None = None
     last_fingerprint: str | None = None
     last_run_at: str | None = None
+    # Verification state (populated by ``autocoder run`` — the integrated
+    # generate → test → heal loop — not by plain ``generate``).
+    last_verified_at: str | None = None
+    last_pytest_outcome: Literal["pass", "fail", ""] = ""
+    heal_attempts: int = 0
     notes: list[str] = Field(default_factory=list)
 
 

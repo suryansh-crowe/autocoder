@@ -276,6 +276,212 @@ def run_status(settings: Settings) -> Registry:
 
 
 # ---------------------------------------------------------------------------
+# Integrated generate → test → heal loop
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PytestOutcome:
+    slug: str
+    passed: bool
+    failure_count: int
+    junit_path: Path
+
+
+@dataclass
+class CycleOutcome:
+    """What ``run_full_cycle`` produces.
+
+    ``generation`` is the :func:`run_generate` result; everything else
+    is verification telemetry collected by the loop.
+    """
+
+    generation: list[StageResult]
+    verification: dict[str, PytestOutcome]
+    heal_attempts: dict[str, int]
+    final_status: dict[str, Status]
+
+
+def _run_pytest_for_slug(slug: str, settings: Settings) -> PytestOutcome:
+    """Run pytest for a single slug's test module and return pass/fail."""
+    from autocoder.heal.pytest_failures import run_pytest_capture
+
+    test_file = settings.paths.steps_dir / f"test_{slug}.py"
+    junit_dir = settings.paths.manifest_dir / "runs"
+    junit_dir.mkdir(parents=True, exist_ok=True)
+    junit_path = junit_dir / f"{slug}.xml"
+    if not test_file.exists():
+        logger.warn("pytest_skipped_missing", slug=slug, path=str(test_file))
+        return PytestOutcome(slug=slug, passed=False, failure_count=0, junit_path=junit_path)
+    failures = run_pytest_capture(test_paths=[test_file], junit_path=junit_path)
+    passed = not failures
+    logger.info(
+        "pytest_outcome",
+        slug=slug,
+        passed=passed,
+        failures=len(failures),
+        junit=str(junit_path),
+    )
+    return PytestOutcome(
+        slug=slug,
+        passed=passed,
+        failure_count=len(failures),
+        junit_path=junit_path,
+    )
+
+
+def run_full_cycle(
+    settings: Settings,
+    opts: GenerateOptions,
+    *,
+    max_heal_attempts: int = 3,
+) -> CycleOutcome:
+    """End-to-end lifecycle: generate → pytest → heal → pytest, on repeat.
+
+    Parameters
+    ----------
+    max_heal_attempts:
+        Upper bound on heal passes per failing slug. Defaults to 3 — a
+        sensible number for a local LLM (`phi4:14b` on CPU): high
+        enough to recover from the common runtime failure modes
+        (`locator_not_found`, `wrong_kind`, `disabled`, `timeout`)
+        without blowing the wall-clock budget. Set `0` to run pytest
+        once and skip healing entirely.
+
+    Flow
+    ----
+    1. :func:`run_generate` produces POM / feature / steps files.
+    2. For every slug whose generation ended in ``COMPLETE`` or
+       ``NEEDS_IMPLEMENTATION`` and has a ``tests/steps/test_<slug>.py``
+       file, pytest is invoked against that single file and the JUnit
+       XML is stored under ``manifest/runs/<slug>.xml``.
+    3. While any slug is failing and ``heal_attempts[slug] <
+       max_heal_attempts``, ``heal_steps(..., from_pytest=True)`` is
+       called for each failing slug; the runtime errors drive
+       LLM-generated patches (validated and written into the step
+       files). Pytest re-runs for just those slugs.
+    4. The loop stops when every slug passes OR no heal attempt
+       produced any change (no point burning the remaining budget).
+    5. The registry is updated: passing slugs go to ``VERIFIED``,
+       failing ones keep ``NEEDS_IMPLEMENTATION`` (or their prior
+       state) and gain ``heal_attempts`` + ``last_pytest_outcome``
+       telemetry.
+    """
+    from autocoder.heal import HealOptions, heal_steps
+
+    gen_results = run_generate(settings, opts)
+    store = RegistryStore(settings.paths.registry_path)
+    registry = store.load()
+
+    # Build the verification set: slugs with a steps file, reached at
+    # least ``COMPLETE``, and have a regenerated test on disk.
+    verifiable: list[str] = []
+    for r in gen_results:
+        if r.node.status in (Status.COMPLETE, Status.NEEDS_IMPLEMENTATION) and r.steps_path:
+            verifiable.append(r.node.slug)
+
+    logger.stage(
+        "run_verification",
+        slugs=",".join(verifiable) or "(none)",
+        count=len(verifiable),
+        max_heal_attempts=max_heal_attempts,
+    )
+
+    verification: dict[str, PytestOutcome] = {}
+    heal_attempts: dict[str, int] = {slug: 0 for slug in verifiable}
+
+    # First pass — run pytest for each verifiable slug.
+    for slug in verifiable:
+        verification[slug] = _run_pytest_for_slug(slug, settings)
+
+    # Heal loop.
+    if max_heal_attempts > 0:
+        for attempt in range(1, max_heal_attempts + 1):
+            failing = [s for s in verifiable if not verification[s].passed]
+            if not failing:
+                break
+            logger.stage(
+                "run_heal_attempt",
+                attempt=attempt,
+                max=max_heal_attempts,
+                failing=",".join(failing),
+            )
+            any_applied = 0
+            for slug in failing:
+                heal_results = heal_steps(
+                    settings,
+                    HealOptions(slug=slug, from_pytest=True),
+                )
+                applied = sum(1 for h in heal_results if h.applied)
+                heal_attempts[slug] = attempt
+                any_applied += applied
+                logger.info(
+                    "run_heal_slug_done",
+                    slug=slug,
+                    attempt=attempt,
+                    total=len(heal_results),
+                    applied=applied,
+                )
+            if any_applied == 0:
+                logger.warn(
+                    "run_heal_no_progress",
+                    attempt=attempt,
+                    hint=(
+                        "no step bodies changed this attempt — the LLM's "
+                        "suggestions were either cached rejections or "
+                        "validator rejections. Stopping the loop early to "
+                        "save cycles."
+                    ),
+                )
+                break
+            # Re-run pytest for just the failing slugs.
+            for slug in failing:
+                verification[slug] = _run_pytest_for_slug(slug, settings)
+
+    # Persist verification outcome to the registry.
+    final_status: dict[str, Status] = {}
+    now = _now_iso()
+    for slug, outcome in verification.items():
+        node = next((n for n in registry.nodes.values() if n.slug == slug), None)
+        if node is None:
+            continue
+        node.last_verified_at = now
+        node.last_pytest_outcome = "pass" if outcome.passed else "fail"
+        node.heal_attempts = heal_attempts.get(slug, 0)
+        if outcome.passed:
+            node.status = Status.VERIFIED
+        elif node.status == Status.COMPLETE:
+            # Generation finished but tests still fail — promote to
+            # needs_implementation so the summary surfaces it.
+            node.status = Status.NEEDS_IMPLEMENTATION
+        final_status[slug] = node.status
+        store.upsert_node(registry, node)
+    store.save(registry)
+
+    verified = sum(1 for o in verification.values() if o.passed)
+    still_failing = sum(1 for o in verification.values() if not o.passed)
+    logger.ok(
+        "run_full_cycle_done",
+        verifiable=len(verifiable),
+        verified=verified,
+        still_failing=still_failing,
+        total_heal_attempts=sum(heal_attempts.values()),
+    )
+    return CycleOutcome(
+        generation=gen_results,
+        verification=verification,
+        heal_attempts=heal_attempts,
+        final_status=final_status,
+    )
+
+
+def _now_iso() -> str:
+    import datetime as _dt
+
+    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+
+
+# ---------------------------------------------------------------------------
 # Auth-first
 # ---------------------------------------------------------------------------
 
@@ -831,6 +1037,45 @@ def _process_url(
         logger.warn("llm_skipped", slug=node.slug, reason="--skip-llm flag set")
         return StageResult(node=node, extraction=extraction, pom_path=None, feature_path=None, steps_path=None, issues=issues)
 
+    # Empty extraction guard. An authenticated SPA that has not
+    # hydrated will hand us zero interactive elements — if we still
+    # call the LLM, it will hallucinate element ids ("title",
+    # "response", "validation-error-message", ...) that do not exist
+    # in ``SELECTORS``, and every generated step fails at runtime
+    # with ``KeyError``. Refuse to generate in that case; the user
+    # gets a clear reason and no broken tests on disk.
+    if not extraction.elements:
+        node.status = Status.NEEDS_IMPLEMENTATION
+        note = "empty_extraction_skipping_generation"
+        if note not in node.notes:
+            node.notes.append(note)
+        store.upsert_node(registry, node)
+        logger.warn(
+            "generation_skipped_empty_extraction",
+            slug=node.slug,
+            final_url=logger.safe_url(extraction.final_url),
+            title=extraction.title,
+            wait_strategy_hint=(
+                "the page responded (HTTP 200) but no interactive "
+                "elements rendered in time"
+            ),
+            hints=";".join([
+                "increase EXTRACTION_NAV_TIMEOUT_MS in .env if the SPA is slow",
+                "check that the URL is the correct post-auth landing (the "
+                "authenticated landing page is often not the same as the "
+                "marketing URL)",
+                "delete .auth/user.json and re-auth if the session is stale",
+            ]),
+        )
+        return StageResult(
+            node=node,
+            extraction=extraction,
+            pom_path=None,
+            feature_path=None,
+            steps_path=None,
+            issues=issues + ["skipped: extraction captured 0 interactive elements"],
+        )
+
     page_class = page_class_name(node.slug)
     fixture_name = node.slug + "_page"
 
@@ -1131,6 +1376,41 @@ def _extract_detailed(
                     "redirects": list(diag.redirects),
                     "err": "redirected_to_login",
                 }
+
+            # Settle wait: many authenticated SPAs only commit the HTML
+            # shell inside the nav-timeout budget and rely on XHR +
+            # client-side rendering for the real DOM. If ``commit`` was
+            # the only wait tier that succeeded, the page is almost
+            # certainly still hydrating. Give it a bounded additional
+            # window to produce at least one interactive element before
+            # we enumerate. Without this, ``extract_page`` runs against
+            # an empty shell and downstream stages hallucinate.
+            if "domcontentloaded" not in diag.wait_strategy:
+                try:
+                    sess.page.wait_for_selector(
+                        'button, a[href], input, textarea, select, '
+                        '[role="button"], [role="link"], [role="textbox"]',
+                        state="attached",
+                        timeout=15_000,
+                    )
+                    logger.info(
+                        "extract_settle_succeeded",
+                        slug=node.slug,
+                        hint="at least one interactive element attached",
+                    )
+                except Exception:
+                    logger.warn(
+                        "extract_settle_timeout",
+                        slug=node.slug,
+                        url=logger.safe_url(node.url),
+                        hint=(
+                            "no interactive element attached within 15s after "
+                            "commit. The page may still be rendering, may be "
+                            "genuinely empty, or may be blocked by a network "
+                            "dependency. Extraction will still run but is "
+                            "likely to return 0 elements."
+                        ),
+                    )
 
             extraction = extract_page(
                 sess.page,

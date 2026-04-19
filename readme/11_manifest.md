@@ -21,6 +21,9 @@ manifest/
   heals/<slug>.<key>.json           cached stub-heal suggestions
   heals/<slug>.fail.<key>.json      cached failure-heal suggestions
   heals/last-pytest.xml             JUnit XML from `heal --from-pytest`
+  runs/<slug>.xml                   JUnit XML from `autocoder run`'s
+                                    per-slug pytest invocation (updated on
+                                    every verification pass in the heal loop)
   logs/<YYYYMMDD-HHMMSS>-<cmd>.log
                         per-invocation newline-delimited JSON log
                         (one file per `autocoder ...` command)
@@ -85,15 +88,31 @@ The orchestrator advances the status **after** writing each artifact,
 so a crash mid-write leaves the prior status intact.
 
 - **`complete`** — all artifacts rendered and the step file has zero
-  `NotImplementedError` placeholders.
-- **`needs_implementation`** — all artifacts rendered, but the step
-  file still has ≥ 1 placeholder that synthesis could not cover. The
-  end-of-run summary becomes `run_done_with_issues` so this does not
-  get missed. Re-running the URL (or `autocoder heal`) picks up the
-  work; `skip_regen` intentionally requires `status == complete` to
-  short-circuit, so `needs_implementation` URLs always regenerate.
-- **`failed`** — any stage raised. Logged with `err_type` so the rest
-  of the run continues.
+  `NotImplementedError` placeholders. `autocoder generate` leaves
+  URLs here; `autocoder run` only uses this state transiently before
+  pytest decides verified/needs_implementation.
+- **`verified`** — generation + pytest both pass (possibly after a
+  number of heal attempts captured in `URLNode.heal_attempts`).
+  Produced exclusively by `autocoder run`. The
+  `URLNode.last_pytest_outcome` is `"pass"` and
+  `URLNode.last_verified_at` carries the ISO timestamp.
+- **`needs_implementation`** — all artifacts rendered, but either
+  synthesis left a placeholder OR pytest still fails after
+  `--max-heal-attempts`. The end-of-run summary becomes
+  `run_done_with_issues` so this does not get missed. `skip_regen`
+  intentionally requires `status == complete` to short-circuit, so
+  `needs_implementation` URLs always regenerate on the next run.
+- **`failed`** — any generation stage raised. Logged with `err_type`
+  so the rest of the run continues.
+
+`URLNode` carries three extra verification fields populated only by
+`autocoder run`:
+
+```yaml
+last_verified_at: '2026-04-19T20:15:42+00:00'
+last_pytest_outcome: pass    # "pass" | "fail" | ""
+heal_attempts: 2             # total heal passes used for this slug
+```
 
 ## Resume
 

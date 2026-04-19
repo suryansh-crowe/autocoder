@@ -305,6 +305,7 @@ def _heal_one(
         suggested,
         fixture_name=stub.fixture_name,
         pom_method_names=pom_method_names,
+        element_ids={e.get("id", "") for e in elements if e.get("id")},
     )
     if val_errors:
         for msg in val_errors:
@@ -653,6 +654,7 @@ def _heal_one_failure(
         suggested,
         fixture_name=stub.fixture_name,
         pom_method_names=pom_method_names,
+        element_ids={e.get("id", "") for e in elements if e.get("id")},
         max_statements=5,
     )
     if val_errors:

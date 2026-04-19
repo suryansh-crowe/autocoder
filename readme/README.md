@@ -4,9 +4,17 @@ URL-driven Playwright BDD test automation built around a local Phi-4 14B
 LLM. The orchestrator turns a list of URLs into a runnable pytest-bdd
 suite — POMs, features, step definitions, and an auth-setup test —
 while keeping the LLM's role to a single tiny JSON action plan per
-stage. A separate `heal` stage fills in step bodies the renderer
-couldn't bind, and `heal --from-pytest` revises step bodies whose
-tests fail at runtime.
+stage.
+
+**Start here:** `autocoder run <urls>` is the single command most
+users want. It generates the suite, runs pytest, invokes
+`heal --from-pytest` for anything that fails at runtime, and loops
+up to `--max-heal-attempts` passes (default 3) before reporting a
+final per-URL state of `verified` / `needs_implementation` / `failed`.
+Exits non-zero when any URL is still failing, so CI catches it.
+
+`autocoder generate` and the separate `autocoder heal` commands
+remain available for offline / fine-grained workflows.
 
 ## Reading order
 

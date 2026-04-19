@@ -44,8 +44,10 @@ from autocoder.heal import HealOptions, heal_steps
 from autocoder.intake.sources import URLSourceError, resolve_urls
 from autocoder.orchestrator import (
     DEFAULT_TIERS,
+    CycleOutcome,
     GenerateOptions,
     run_extend,
+    run_full_cycle,
     run_generate,
     run_status,
 )
@@ -174,6 +176,96 @@ def generate(
     results = run_generate(settings, opts)
     _print_results(results)
     logger.ok("cli_done", cmd="generate", processed=len(results))
+
+
+@cli.command("run")
+@click.argument("urls", nargs=-1, required=False)
+@click.option(
+    "--urls-file",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Plain-text file of URLs (one per line, '#' comments allowed).",
+)
+@click.option(
+    "--tier",
+    "tiers",
+    multiple=True,
+    type=click.Choice(_TIER_CHOICES),
+    help="Scenario tiers to generate. Defaults to smoke + happy + validation.",
+)
+@click.option("--force", is_flag=True, help="Ignore caches and rebuild every artifact.")
+@click.option("--skip-llm", is_flag=True, help="Intake + extraction only; do not call the LLM.")
+@click.option(
+    "--max-heal-attempts",
+    type=click.IntRange(0, 20),
+    default=3,
+    show_default=True,
+    help="How many heal passes to run per failing test file before giving up. "
+    "Each pass runs pytest, then `heal --from-pytest` for every failing slug, "
+    "then pytest again. Set 0 to run pytest once and skip healing entirely.",
+)
+def run(
+    urls: tuple[str, ...],
+    urls_file: Path | None,
+    tiers: tuple[str, ...],
+    force: bool,
+    skip_llm: bool,
+    max_heal_attempts: int,
+) -> None:
+    """Full lifecycle: generate -> pytest -> heal -> pytest, on repeat.
+
+    This is the single command most users should run. It performs the
+    same intake/auth-first/extraction/generation pipeline as
+    ``autocoder generate``, then immediately invokes pytest against
+    the freshly-written tests. Failing tests trigger
+    ``heal --from-pytest`` (which consumes the actual Playwright error
+    messages -- not just ``NotImplementedError`` stubs) and the loop
+    repeats for up to ``--max-heal-attempts`` passes.
+
+    A URL ends in one of three states:
+
+    * ``verified`` -- generation + tests all passing.
+    * ``needs_implementation`` -- generation finished but some tests
+      still fail after the heal budget. Use
+      ``autocoder heal --from-pytest --slug <slug>`` to try again,
+      or hand-edit.
+    * ``failed`` -- generation itself failed; see ``url_failed`` log.
+    """
+    settings = load_settings()
+    logger.init(settings.paths.logs_dir, level=settings.log_level, command="run")
+    chosen_tiers = list(tiers) or list(DEFAULT_TIERS)
+    logger.info(
+        "cli_invoke",
+        cmd="run",
+        force=force,
+        skip_llm=skip_llm,
+        tiers=",".join(chosen_tiers),
+        max_heal_attempts=max_heal_attempts,
+        log_level=settings.log_level,
+        log_file=str(logger.active_log_path() or ""),
+    )
+    resolved = _resolve_or_exit(urls, urls_file, settings)
+    opts = GenerateOptions(
+        urls=resolved,
+        tiers=chosen_tiers,
+        force=force,
+        skip_llm=skip_llm,
+    )
+    outcome = run_full_cycle(settings, opts, max_heal_attempts=max_heal_attempts)
+    _print_cycle_outcome(outcome)
+    verified = sum(1 for v in outcome.verification.values() if v.passed)
+    still_failing = sum(1 for v in outcome.verification.values() if not v.passed)
+    logger.ok(
+        "cli_done",
+        cmd="run",
+        processed=len(outcome.generation),
+        verified=verified,
+        still_failing=still_failing,
+    )
+    # Non-zero exit when any slug is still failing at the end of the
+    # cycle, so CI pipelines reliably catch it.
+    if still_failing:
+        sys.exit(1)
 
 
 @cli.command("rerun")
@@ -357,6 +449,44 @@ def _print_results(results) -> None:
             r.node.status.value,
             _short_path(r.pom_path),
             _short_path(r.feature_path),
+            _short_path(r.steps_path),
+        )
+    _console.print(table)
+
+
+def _print_cycle_outcome(outcome: CycleOutcome) -> None:
+    if not outcome.generation:
+        _console.print("[dim]No URLs processed.[/]")
+        return
+
+    table = Table(title="autocoder run — full lifecycle", show_lines=False)
+    for col in ("slug", "generation", "tests", "heal_attempts", "final", "steps"):
+        table.add_column(col, overflow="fold")
+    gen_status_by_slug = {r.node.slug: r.node.status.value for r in outcome.generation}
+    for r in outcome.generation:
+        slug = r.node.slug
+        gen = gen_status_by_slug.get(slug, "?")
+        verif = outcome.verification.get(slug)
+        if verif is None:
+            tests_cell = "-"
+        elif verif.passed:
+            tests_cell = "[green]pass[/]"
+        else:
+            tests_cell = f"[red]fail ({verif.failure_count})[/]"
+        heals = outcome.heal_attempts.get(slug, 0)
+        final = outcome.final_status.get(slug, r.node.status).value
+        final_style = {
+            "verified": "green",
+            "complete": "cyan",
+            "needs_implementation": "yellow",
+            "failed": "red",
+        }.get(final, "white")
+        table.add_row(
+            slug,
+            gen,
+            tests_cell,
+            str(heals),
+            f"[{final_style}]{final}[/]",
             _short_path(r.steps_path),
         )
     _console.print(table)

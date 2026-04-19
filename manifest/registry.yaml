@@ -1,0 +1,62 @@
+version: 1
+base_url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/stewie
+auth:
+  login_url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/login
+  username_env: LOGIN_USERNAME
+  password_env: LOGIN_PASSWORD
+  otp_secret_env: LOGIN_OTP_SECRET
+  auth_kind: sso_microsoft
+  username_selector: null
+  password_selector: null
+  submit_selector: null
+  continue_selector: null
+  sso_button_selector:
+    strategy: role_name
+    value: button
+    role: button
+    name: Sign in with Microsoft
+    nth: null
+  requires_external_completion: false
+  success_indicator_url_contains: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/stewie
+  success_indicator_text: null
+  setup_path: C:\Users\singhs14\OneDrive - Crowe LLP\Desktop\autocoder\tests\auth_setup\test_auth_setup.py
+  storage_state_path: C:\Users\singhs14\OneDrive - Crowe LLP\Desktop\autocoder\.auth\user.json
+  last_run_at: null
+  status: steps_ready
+  notes: []
+nodes:
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/login:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/login
+    slug: login
+    kind: login
+    requires_auth: false
+    depends_on: []
+    redirects_to: null
+    status: complete
+    extraction_path: null
+    plan_path: null
+    pom_path: null
+    feature_path: null
+    steps_path: null
+    last_fingerprint: null
+    last_run_at: null
+    notes:
+    - login_inferred_from_path
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/stewie:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/stewie
+    slug: stewie
+    kind: public
+    requires_auth: true
+    depends_on: []
+    redirects_to: null
+    status: complete
+    extraction_path: C:\Users\singhs14\OneDrive - Crowe LLP\Desktop\autocoder\manifest\extractions\stewie.json
+    plan_path: null
+    pom_path: C:\Users\singhs14\OneDrive - Crowe LLP\Desktop\autocoder\tests\pages\stewie_page.py
+    feature_path: C:\Users\singhs14\OneDrive - Crowe LLP\Desktop\autocoder\tests\features\stewie.feature
+    steps_path: C:\Users\singhs14\OneDrive - Crowe LLP\Desktop\autocoder\tests\steps\test_stewie.py
+    last_fingerprint: 2ca6a4fe5de8c2fa
+    last_run_at: null
+    notes:
+    - auth_gated_shell_detected
+updated_at: '2026-04-19T15:07:51+00:00'

@@ -53,7 +53,8 @@
       "Bash(rm -f tests/.auth/*.json)",
       "Bash(python -m pytest tests/ -q --no-header -x)",
       "Bash(python -m pytest tests/ -q --no-header)",
-      "Bash(python -m pytest tests/unit -q --no-header)"
+      "Bash(python -m pytest tests/unit -q --no-header)",
+      "Bash(python -m autocoder.cli run --help)"
     ]
   },
   "disabledMcpjsonServers": [

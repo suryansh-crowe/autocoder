@@ -1,8 +1,18 @@
 # 04 · End-to-end pipeline
 
-The orchestrator runs nine stages per `autocoder generate` invocation.
+There are two entry points:
+
+| Command | What it runs |
+|---------|-------------|
+| `autocoder generate` | Stages 1-8 only. Produces files on disk. Does **not** invoke pytest. |
+| `autocoder run` | Stages 1-8 + pytest + heal-from-pytest + pytest loop, up to `--max-heal-attempts` (default 3) passes. The canonical "give me tests that actually pass" entry point. |
+
+Both share the nine generation stages below. `autocoder run` adds a
+verification phase described at the end of this doc.
+
+The orchestrator runs nine stages per generation invocation.
 Stages 4 and 6 are the only ones that talk to the LLM. Stage 2 (auth)
-now actually performs the login in-process. Everything else is
+actually performs the login in-process. Everything else is
 deterministic.
 
 ```
@@ -173,6 +183,71 @@ deterministic.
 | 7b. Steps      | `autocoder/generate/steps.py`       | 0                  | `tests/steps/test_<slug>.py` (+ quality gate) |
 | 8. Persist     | `autocoder/registry/`               | 0                  | `registry.yaml` + `manifest/logs/<ts>-<cmd>.log` |
 | **9. Heal (optional)** | `autocoder/heal/`           | ~250 in / ~30 out per stub; ~400 / ~80 per failure | Step bodies in `tests/steps/test_<slug>.py` (stub fill or runtime-failure revision) |
+
+## Verification + heal loop (`autocoder run` only)
+
+After stage 8 completes for every URL, `autocoder run` enters a
+verification phase. This phase is where runtime failures — bad
+locators, wrong control-type assumptions (`.check()` on a button),
+timing issues, DOM drift, assertion mismatches — get healed.
+
+```
+                    for every slug with status in (complete, needs_implementation)
+                    and a tests/steps/test_<slug>.py file on disk:
+                             │
+                             ▼
+┌────────────────────────────────────────────────────────────────┐
+│ 9. VERIFY      autocoder/orchestrator.py:_run_pytest_for_slug  │
+│   ─ invokes `pytest tests/steps/test_<slug>.py` with a JUnit   │
+│     report at manifest/runs/<slug>.xml                         │
+│   ─ parses failures via heal/pytest_failures.py                │
+│   ─ captures failure_class (timeout, disabled, intercepted,    │
+│     wrong_kind, locator_not_found, not_visible, not_attached,  │
+│     other) for each failing step                               │
+│   ─ emits pytest_outcome slug=X passed=T/F failures=N          │
+└────────────────────────────────────────────────────────────────┘
+                             │
+                 all passed? ┤
+                     yes ◄───┘───► no, and heal_attempts < max_heal_attempts
+                                                    │
+                                                    ▼
+┌────────────────────────────────────────────────────────────────┐
+│ 10. HEAL       autocoder/heal/runner.py  (from_pytest=True)    │
+│   ─ per failing slug: read the JUnit XML, build a HEAL prompt  │
+│     with failure_class + step text + current body + Playwright │
+│     error message                                              │
+│   ─ ONE LLM call per failing step, json_mode=True              │
+│   ─ validator enforces: ≤5 stmts, allowed node types,          │
+│     every fixture method must exist in the POM plan,           │
+│     every `locate('id')` must reference a real SELECTORS key   │
+│   ─ applier line-replaces the body and re-parses the file;     │
+│     rolls back if the rewrite no longer parses                 │
+│   ─ suggestions are cached by (slug, step_text, fingerprint,   │
+│     failure_class) so reruns of the same failure cost 0 tokens │
+│   ─ emits run_heal_slug_done slug=X attempt=N applied=K        │
+│   if no body changed this attempt → exit loop early            │
+└────────────────────────────────────────────────────────────────┘
+                             │
+                             ▼
+                back to stage 9 for the same failing slugs
+```
+
+End-of-cycle bookkeeping:
+
+- Slugs whose tests pass → `Status.VERIFIED` in `registry.yaml`.
+- Slugs that failed at least one test after the heal budget was spent
+  → `Status.NEEDS_IMPLEMENTATION` with `heal_attempts=N` and
+  `last_pytest_outcome="fail"`.
+- Every URL gains `last_verified_at` ISO timestamp.
+
+The CLI exit code is **1** when any URL is still failing, **0** when
+everything verified.
+
+Default `--max-heal-attempts=3` is tuned for a local LLM (`phi4:14b`
+on CPU): high enough to recover from the common failure modes
+(`locator_not_found`, `wrong_kind`, `disabled`, `timeout`,
+`intercepted`, `not_visible`) without blowing the wall-clock budget.
+Override it on the CLI or set `0` to skip healing entirely.
 
 ## Resume / rerun in one paragraph
 

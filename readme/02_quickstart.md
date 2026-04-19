@@ -72,23 +72,51 @@ python scripts/verify_local_llm.py             # PASS = inference is local-only
 autocoder status                                # registry view (empty on first run)
 ```
 
-## 5. Generate
+## 5. Generate, test, and heal in one shot
 
-Pick whichever URL source fits your workflow:
+For most users the right command is `autocoder run`, which chains
+generation -> pytest -> heal -> pytest until every slug passes or the
+heal budget is spent:
 
 ```bash
 # (a) CLI args
-autocoder generate https://app.example.com/login https://app.example.com/dashboard
+autocoder run https://app.example.com/login https://app.example.com/dashboard
 
 # (b) Plain-text file (one URL per line, '#' comments allowed)
-autocoder generate --urls-file urls.txt
+autocoder run --urls-file urls.txt
 
 # (c) From .env (BASE_URL + LOGIN_URL configured above)
-autocoder generate
+autocoder run
 ```
 
-Other flags: `--tier smoke|happy|validation|regression|edge|...`,
-`--force` (ignore caches), `--skip-llm` (browser + extraction only).
+Common flags:
+
+| Flag | Meaning |
+|------|---------|
+| `--tier smoke\|happy\|validation\|regression\|edge\|...` | Scenario tiers. Defaults to smoke + happy + validation. |
+| `--force` | Ignore caches and rebuild every artifact. |
+| `--skip-llm` | Run intake + extraction only; do not call the LLM. |
+| `--max-heal-attempts N` | Upper bound on heal passes per failing test file. Defaults to **3**. Set `0` to run pytest once and skip healing. |
+
+The command exits non-zero when any URL's tests still fail at the end
+of the cycle, so CI pipelines reliably catch it. Final per-URL state
+is one of:
+
+| Final state | Meaning |
+|-------------|---------|
+| `verified` | generation + pytest all passing (possibly after healing). |
+| `needs_implementation` | generation finished but some tests still fail after the heal budget. Run `autocoder heal --from-pytest --slug <slug>` to try again, or hand-edit. |
+| `failed` | generation itself failed; see the `url_failed` log line. |
+
+If you only want generation without running pytest (e.g. during
+offline development, or when the real app is not reachable):
+
+```bash
+autocoder generate <urls>
+```
+
+Other flags are identical. Healing after the fact is available via
+`autocoder heal --from-pytest`.
 
 Output:
 
@@ -118,6 +146,12 @@ autocoder heal --slug login                    # apply
 
 Cached in `manifest/heals/`; reruns of unchanged stubs cost zero
 tokens.
+
+## 6b. (optional) Run pytest by itself
+
+`autocoder run` already invokes pytest for you. This section is only
+relevant when you want to re-run the suite manually — for example
+after hand-editing a step file:
 
 ## 7. Run the suite
 
