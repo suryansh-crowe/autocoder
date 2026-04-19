@@ -32,7 +32,14 @@ from autocoder import logger
 from autocoder.config import Settings, ensure_dirs
 from autocoder.extract.auth_probe import build_auth_spec
 from autocoder.extract.auth_runner import run_auth
-from autocoder.extract.browser import AuthUnreachable, goto_resilient, open_session
+from autocoder.extract.browser import (
+    AuthUnreachable,
+    BrowserSession,
+    goto_resilient,
+    open_session,
+    open_shared_session,
+)
+from contextlib import contextmanager, nullcontext
 from autocoder.extract.inspector import extract_page
 from autocoder.generate.auth_setup import render_auth_setup
 from autocoder.generate.feature import render_feature
@@ -141,9 +148,20 @@ def run_generate(settings: Settings, opts: GenerateOptions) -> list[StageResult]
     )
     if registry.auth is None:
         registry.auth = _maybe_seed_auth(registry, settings, detected_login)
-    if registry.auth is not None:
-        _materialise_auth(registry, settings, store)
-    else:
+
+    # When the run touches authenticated URLs, we open ONE long-lived
+    # browser context for the auth stage AND every URL extraction.
+    # This preserves MSAL's in-memory state + sessionStorage (which
+    # Playwright's storage_state does not persist), so SPAs that
+    # require the user's SSO account to be "hydrated" in the tab show
+    # the authenticated DOM on every subsequent URL instead of the
+    # consent shell.
+    shared_ctx = (
+        open_shared_session(settings, use_storage_state=True)
+        if registry.auth is not None or needs_auth
+        else nullcontext(None)
+    )
+    if registry.auth is None:
         logger.info(
             "auth_skipped",
             reason="no_login_signal" if not has_login_signal else "no_authenticated_urls",
@@ -151,103 +169,112 @@ def run_generate(settings: Settings, opts: GenerateOptions) -> list[StageResult]
             has_login_signal=has_login_signal,
         )
 
-    # Stage 3+: per-URL pipeline in dependency order
-    deps = build_dependency_graph(
-        list(registry.nodes.values()),
-        registry.auth.login_url if registry.auth else None,
-    )
-    ordered = topological_order(list(registry.nodes.values()), deps)
-    logger.info(
-        "pipeline_order",
-        count=len(ordered),
-        order=",".join(n.slug for n in ordered),
-    )
-
-    client = None
-    if not opts.skip_llm:
-        client = get_llm_client(settings)
-        backend = "azure_openai" if settings.use_azure_openai else "ollama"
-        endpoint = (
-            settings.azure_openai.endpoint
-            if settings.use_azure_openai
-            else settings.ollama.endpoint
-        )
-        logger.info("llm_check", backend=backend, endpoint=endpoint)
-        if not client.is_available():
-            logger.die(
-                "llm_unreachable",
-                backend=backend,
-                endpoint=endpoint,
-                hint=(
-                    "Verify the Azure endpoint/deployment/api-key." if settings.use_azure_openai
-                    else "Start the container; see readme/09_llm.md."
-                ),
-            )
-        logger.ok("llm_ready", backend=backend, endpoint=endpoint)
-    else:
-        logger.warn("llm_skipped_by_flag", flag="--skip-llm")
-
     results: list[StageResult] = []
-    try:
-        for idx, node in enumerate(ordered, start=1):
-            logger.stage(
-                "url_begin",
-                position=f"{idx}/{len(ordered)}",
-                slug=node.slug,
-                url=logger.safe_url(node.url),
-                kind=node.kind.value,
-                status=node.status.value,
+    client = None
+    with shared_ctx as shared:
+        # Auth-first inside the shared session so the context that
+        # completes the sign-in is the same one every URL extraction
+        # uses afterwards.
+        if registry.auth is not None:
+            _materialise_auth(registry, settings, store, shared=shared)
+
+        # Stage 3+: per-URL pipeline in dependency order
+        deps = build_dependency_graph(
+            list(registry.nodes.values()),
+            registry.auth.login_url if registry.auth else None,
+        )
+        ordered = topological_order(list(registry.nodes.values()), deps)
+        logger.info(
+            "pipeline_order",
+            count=len(ordered),
+            order=",".join(n.slug for n in ordered),
+        )
+
+        if not opts.skip_llm:
+            client = get_llm_client(settings)
+            backend = "azure_openai" if settings.use_azure_openai else "ollama"
+            endpoint = (
+                settings.azure_openai.endpoint
+                if settings.use_azure_openai
+                else settings.ollama.endpoint
             )
-
-            if node.kind == URLKind.LOGIN and registry.auth and node.url == registry.auth.login_url:
-                node.status = Status.COMPLETE
-                store.upsert_node(registry, node)
-                logger.ok(
-                    "url_skipped",
-                    slug=node.slug,
-                    reason="login_url_covered_by_auth_setup",
+            logger.info("llm_check", backend=backend, endpoint=endpoint)
+            if not client.is_available():
+                logger.die(
+                    "llm_unreachable",
+                    backend=backend,
+                    endpoint=endpoint,
+                    hint=(
+                        "Verify the Azure endpoint/deployment/api-key." if settings.use_azure_openai
+                        else "Start the container; see readme/09_llm.md."
+                    ),
                 )
-                continue
+            logger.ok("llm_ready", backend=backend, endpoint=endpoint)
+        else:
+            logger.warn("llm_skipped_by_flag", flag="--skip-llm")
 
-            try:
-                result = _process_url(node, registry, settings, store, client, opts)
-            except Exception as exc:  # noqa: BLE001
-                # One URL must not be able to abort the whole run.
-                # Mark it failed, log, persist, and continue with the
-                # next URL. The user can rerun once the cause is fixed.
-                node.status = Status.FAILED
-                store.upsert_node(registry, node)
+        try:
+            for idx, node in enumerate(ordered, start=1):
+                logger.stage(
+                    "url_begin",
+                    position=f"{idx}/{len(ordered)}",
+                    slug=node.slug,
+                    url=logger.safe_url(node.url),
+                    kind=node.kind.value,
+                    status=node.status.value,
+                )
+
+                if node.kind == URLKind.LOGIN and registry.auth and node.url == registry.auth.login_url:
+                    node.status = Status.COMPLETE
+                    store.upsert_node(registry, node)
+                    logger.ok(
+                        "url_skipped",
+                        slug=node.slug,
+                        reason="login_url_covered_by_auth_setup",
+                    )
+                    continue
+
+                try:
+                    result = _process_url(
+                        node, registry, settings, store, client, opts, shared=shared
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # One URL must not be able to abort the whole run.
+                    # Mark it failed, log, persist, and continue with the
+                    # next URL. The user can rerun once the cause is fixed.
+                    node.status = Status.FAILED
+                    store.upsert_node(registry, node)
+                    store.save(registry)
+                    logger.error(
+                        "url_failed",
+                        slug=node.slug,
+                        err=str(exc),
+                        err_type=type(exc).__name__,
+                    )
+                    results.append(StageResult(
+                        node=node,
+                        extraction=None,
+                        pom_path=Path(node.pom_path) if node.pom_path else None,
+                        feature_path=Path(node.feature_path) if node.feature_path else None,
+                        steps_path=Path(node.steps_path) if node.steps_path else None,
+                        issues=[f"{type(exc).__name__}: {exc!s}"],
+                    ))
+                    continue
+                results.append(result)
+                store.upsert_node(registry, result.node)
                 store.save(registry)
-                logger.error(
-                    "url_failed",
+                logger.ok(
+                    "url_done",
                     slug=node.slug,
-                    err=str(exc),
-                    err_type=type(exc).__name__,
+                    status=result.node.status.value,
+                    pom=bool(result.pom_path),
+                    feature=bool(result.feature_path),
+                    steps=bool(result.steps_path),
+                    issues=len(result.issues),
                 )
-                results.append(StageResult(
-                    node=node,
-                    extraction=None,
-                    pom_path=Path(node.pom_path) if node.pom_path else None,
-                    feature_path=Path(node.feature_path) if node.feature_path else None,
-                    steps_path=Path(node.steps_path) if node.steps_path else None,
-                    issues=[f"{type(exc).__name__}: {exc!s}"],
-                ))
-                continue
-            results.append(result)
-            store.upsert_node(registry, result.node)
-            store.save(registry)
-            logger.ok(
-                "url_done",
-                slug=node.slug,
-                status=result.node.status.value,
-                pom=bool(result.pom_path),
-                feature=bool(result.feature_path),
-                steps=bool(result.steps_path),
-                issues=len(result.issues),
-            )
-    finally:
-        if client is not None:
-            client.close()
+        finally:
+            if client is not None:
+                client.close()
 
     store.save(registry)
     complete = sum(1 for r in results if r.node.status == Status.COMPLETE)
@@ -630,8 +657,17 @@ def _materialise_auth(
     registry: Registry,
     settings: Settings,
     store: RegistryStore,
+    *,
+    shared: BrowserSession | None = None,
 ) -> None:
-    """Probe the login page, render the auth setup test, persist the spec."""
+    """Probe the login page, render the auth setup test, persist the spec.
+
+    When ``shared`` is provided, the auth probe and the live login
+    runner drive **that** page instead of opening their own throwaway
+    browser. The in-memory MSAL state and ``sessionStorage`` that the
+    login populates therefore survive into every URL extraction that
+    follows in the same run.
+    """
     auth = registry.auth
     if auth is None:
         return
@@ -675,11 +711,11 @@ def _materialise_auth(
                 "a session; re-running the in-process auth runner now"
             ),
         )
-        _run_and_persist_auth(auth, registry, settings, store)
+        _run_and_persist_auth(auth, registry, settings, store, shared=shared)
         return
 
     logger.info("auth_probe_start", url=logger.safe_url(auth.login_url))
-    with open_session(settings, use_storage_state=False) as sess:
+    with _session_or_open(shared, settings, use_storage=False) as sess:
         try:
             diag = goto_resilient(
                 sess.page,
@@ -785,7 +821,7 @@ def _materialise_auth(
     # Actually perform the login so the rest of the run has a session.
     # If credentials are missing we log and return — the rendered
     # auth-setup test is still on disk for the user to run manually.
-    _run_and_persist_auth(merged, registry, settings, store)
+    _run_and_persist_auth(merged, registry, settings, store, shared=shared)
 
 
 def _run_and_persist_auth(
@@ -793,6 +829,8 @@ def _run_and_persist_auth(
     registry: Registry,
     settings: Settings,
     store: RegistryStore,
+    *,
+    shared: BrowserSession | None = None,
 ) -> None:
     """Execute the in-process auth runner and persist the outcome.
 
@@ -809,7 +847,7 @@ def _run_and_persist_auth(
       ``PENDING`` so the next run re-tries the runner instead of
       silently reusing a "setup ready" marker that never had a session.
     """
-    result = run_auth(spec, settings)
+    result = run_auth(spec, settings, shared=shared)
     if result.ok:
         logger.ok(
             "auth_session_captured",
@@ -904,6 +942,8 @@ def _process_url(
     store: RegistryStore,
     client,  # OllamaClient | AzureOpenAIClient | None — typed loosely on purpose
     opts: GenerateOptions,
+    *,
+    shared: BrowserSession | None = None,
 ) -> StageResult:
     issues: list[str] = []
     # Storage is used when:
@@ -970,10 +1010,10 @@ def _process_url(
         reason=reason,
     )
 
-    extraction, failure = _extract_detailed(node, settings, use_storage)
+    extraction, failure = _extract_detailed(node, settings, use_storage, shared=shared)
     if extraction is None and failure is not None:
         extraction = _maybe_escalate_to_auth(
-            node, registry, settings, store, failure, use_storage
+            node, registry, settings, store, failure, use_storage, shared=shared
         )
     if extraction is None:
         node.status = Status.FAILED
@@ -1200,6 +1240,8 @@ def _maybe_escalate_to_auth(
     store: RegistryStore,
     failure: dict,
     already_used_storage: bool,
+    *,
+    shared: BrowserSession | None = None,
 ) -> PageExtraction | None:
     """Convert an anonymous extract failure into an auth-first retry.
 
@@ -1282,7 +1324,7 @@ def _maybe_escalate_to_auth(
         return None
 
     logger.info("auth_escalation_retry", slug=node.slug, use_storage=True)
-    retry, retry_failure = _extract_detailed(node, settings, use_storage=True)
+    retry, retry_failure = _extract_detailed(node, settings, use_storage=True, shared=shared)
     if retry is not None:
         logger.ok("auth_escalation_succeeded", slug=node.slug)
         return retry
@@ -1470,6 +1512,28 @@ def _silent_reauth(sess, target_url: str, settings: Settings) -> bool:
     return not _looks_auth_gated_quick(page)
 
 
+@contextmanager
+def _session_or_open(
+    shared: BrowserSession | None,
+    settings: Settings,
+    *,
+    use_storage: bool,
+):
+    """Yield ``shared`` if provided, else spin up a one-shot ``open_session``.
+
+    Lets the auth runner and every extract call use the same page
+    when the orchestrator is running the authenticated lifecycle in a
+    shared long-lived browser, while keeping the classifier /
+    homepage-probe paths on the current throwaway-context path (they
+    run anonymously anyway).
+    """
+    if shared is not None:
+        yield shared
+    else:
+        with open_session(settings, use_storage_state=use_storage) as sess:
+            yield sess
+
+
 def _extract(node: URLNode, settings: Settings, use_storage: bool) -> PageExtraction | None:
     """Extract one URL. Returns ``None`` on any failure.
 
@@ -1484,6 +1548,8 @@ def _extract_detailed(
     node: URLNode,
     settings: Settings,
     use_storage: bool,
+    *,
+    shared: BrowserSession | None = None,
 ) -> tuple[PageExtraction | None, dict | None]:
     """Return ``(extraction, failure_info)``.
 
@@ -1502,9 +1568,10 @@ def _extract_detailed(
         slug=node.slug,
         url=logger.safe_url(node.url),
         use_storage=use_storage,
+        shared=shared is not None,
     )
     try:
-        with open_session(settings, use_storage_state=use_storage) as sess:
+        with _session_or_open(shared, settings, use_storage=use_storage) as sess:
             try:
                 diag = goto_resilient(
                     sess.page,

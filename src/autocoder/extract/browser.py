@@ -125,6 +125,80 @@ def ensure_storage_state_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+@contextmanager
+def open_shared_session(settings: Settings, *, use_storage_state: bool = False):
+    """Open a Playwright context that **stays open** across multiple URLs.
+
+    ``open_session`` is one-shot: it opens a browser, does the thing,
+    and closes. That loses every piece of in-memory session state
+    that MSAL (and similar SPA auth libraries) keep outside cookies:
+
+    * ``sessionStorage`` — where MSAL stores its authenticated account.
+    * in-memory token cache of the MSAL JS client.
+    * service-worker-held state.
+
+    Playwright's ``context.storage_state(path=...)`` only captures
+    cookies and ``localStorage``. So a run that closes the auth
+    context before navigating to the real URLs forces every URL to
+    show its pre-auth consent shell — the SPA starts fresh and MSAL
+    can't find an account.
+
+    This session context manager is intended to span the entire
+    auth-first + per-URL extraction phase. Call it once at the top
+    of the orchestrator, pass it into the auth runner and into every
+    ``_extract_detailed`` call. The browser remains open through the
+    whole authenticated lifecycle; we only close it at the end, and
+    we save ``storage_state`` on exit so the file on disk reflects
+    any cookies refreshed mid-run.
+
+    Yields the same :class:`BrowserSession` dataclass as
+    :func:`open_session` for drop-in compatibility.
+    """
+    storage_state: str | None = None
+    sp = settings.paths.storage_state
+    if use_storage_state and sp.exists() and sp.stat().st_size > 0:
+        storage_state = str(sp)
+        logger.debug("shared_storage_loaded", path=str(sp))
+
+    pw = sync_playwright().start()
+    try:
+        browser = pw.chromium.launch(headless=settings.browser.headless)
+        ctx_kwargs: dict = {}
+        if storage_state:
+            ctx_kwargs["storage_state"] = storage_state
+        context = browser.new_context(**ctx_kwargs)
+        context.set_default_timeout(settings.browser.extraction_timeout_ms)
+        context.set_default_navigation_timeout(settings.browser.extraction_nav_timeout_ms)
+        page = context.new_page()
+        logger.info(
+            "shared_session_opened",
+            headless=settings.browser.headless,
+            storage_state=bool(storage_state),
+        )
+        try:
+            yield BrowserSession(pw=pw, browser=browser, context=context, page=page)
+        finally:
+            # Persist storage state before teardown so any cookie
+            # refresh the app issued during the run is not lost.
+            try:
+                sp.parent.mkdir(parents=True, exist_ok=True)
+                context.storage_state(path=str(sp))
+                logger.debug("shared_storage_saved", path=str(sp))
+            except Exception:
+                pass
+            try:
+                context.close()
+            except Exception:
+                pass
+            try:
+                browser.close()
+            except Exception:
+                pass
+            logger.info("shared_session_closed")
+    finally:
+        pw.stop()
+
+
 def goto_resilient(
     page: Page,
     url: str,

@@ -502,6 +502,7 @@ def run_auth(
     settings: Settings,
     *,
     on_storage_saved: Callable[[str], None] | None = None,
+    shared=None,  # BrowserSession | None — avoids cross-module import cycle
 ) -> AuthRunResult:
     """Perform login end-to-end and write storage_state on success.
 
@@ -511,6 +512,14 @@ def run_auth(
     reach the page, fill whatever the user supplied, capture whatever
     cookies the IdP dropped so far, and return a clear ``reason``
     that tells the orchestrator the flow needs external completion.
+
+    ``shared``: optional long-lived :class:`BrowserSession` the
+    orchestrator keeps alive across the auth stage + every URL
+    extraction. When provided, we drive the same page instead of
+    opening our own throwaway browser — preserving MSAL's in-memory
+    client state and ``sessionStorage`` (which Playwright's
+    ``storage_state`` does **not** persist) so later extractions
+    reach the authenticated DOM instead of the consent shell.
     """
     username, password, creds_reason = _credentials(spec)
     if creds_reason == "missing_username":
@@ -566,8 +575,16 @@ def run_auth(
             ),
         )
 
+    # When the orchestrator has opened a long-lived shared session,
+    # drive that page; do not open a second browser. This is what lets
+    # the MSAL client state + sessionStorage survive into the
+    # per-URL extraction phase.
+    from contextlib import nullcontext as _nullcontext
+    session_ctx = _nullcontext(shared) if shared is not None else open_session(
+        settings, use_storage_state=False
+    )
     try:
-        with open_session(settings, use_storage_state=False) as sess:
+        with session_ctx as sess:
             try:
                 diag = goto_resilient(
                     sess.page,
