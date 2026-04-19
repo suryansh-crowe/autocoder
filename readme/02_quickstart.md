@@ -86,7 +86,14 @@ Output:
 - `tests/pages/<slug>_page.py` — generated POMs
 - `tests/features/<slug>.feature` — Gherkin
 - `tests/steps/test_<slug>.py` — pytest-bdd step modules
-- `tests/auth_setup/test_auth_setup.py` — only when an auth URL is in scope
+- `tests/auth_setup/test_auth_setup.py` — rendered whenever auth is in scope; the renderer picks a template for the detected `auth_kind` (form / sso / username-first / email-only)
+- `.auth/user.json` — Playwright storage state. For `form` and
+  `sso_microsoft` flows, `autocoder generate` performs the login
+  in-process and writes this file automatically. For flows that
+  require an external step (magic link, OTP, MFA), the orchestrator
+  persists whatever cookies it could collect and surfaces
+  `auth_session_awaiting_external` — you run the rendered
+  `test_auth_setup.py` headful once to finish it.
 - `manifest/registry.yaml` + `manifest/extractions/` + `manifest/plans/`
 
 ## 6. Heal what the renderer left as `NotImplementedError`
@@ -105,18 +112,30 @@ tokens.
 
 ## 7. Run the suite
 
-```bash
-# auth-setup runs once (or whenever credentials rotate)
-pytest tests/auth_setup -m auth_setup
+For most setups `autocoder generate` has already captured the
+authenticated session, so you can skip straight to running the
+generated tests:
 
-# the rest
+```bash
 pytest tests/steps/test_login.py --headed     # watch in a browser first
 pytest -m smoke                                # smoke tier
 pytest                                         # everything
 ```
 
-`tests/.auth/user.json` holds the captured session; subsequent runs
-inherit it via `storage_state`.
+`.auth/user.json` holds the captured session; every generated test
+inherits it via the `browser_context_args` fixture in
+`tests/conftest.py`.
+
+If the run log ends with `auth_session_awaiting_external` (magic
+link, OTP, or tenant MFA that the runner can't complete on its own),
+run the rendered setup headful to finish the flow once:
+
+```bash
+HEADLESS=false pytest tests/auth_setup -m auth_setup
+```
+
+After that, subsequent `autocoder generate` / `pytest` runs just
+reuse `.auth/user.json` until the session expires.
 
 ## 8. Heal runtime failures (loop until green or until human input is needed)
 
@@ -153,10 +172,15 @@ the real success URL, real credentials, real MFA flow.
 | Symptom | Fix |
 |---------|-----|
 | `ollama_unreachable` | `docker start autocoder-phi4`; `curl http://localhost:11434/api/tags` |
-| `OllamaError: Could not parse JSON ... Unterminated string` | `OLLAMA_NUM_PREDICT=2048` in `.env` |
-| `auth_form_not_detected` | App uses external SSO (no inline password). Capture `storage_state` by hand or set `LOGIN_URL` explicitly. |
+| `OllamaError: Could not parse JSON ... Unterminated string` | Raise `OLLAMA_NUM_PREDICT` in `.env` (2048+). The client already retries once with a stricter prompt and recovers fenced / truncated JSON before raising. |
+| `auth_session_not_captured reason=missing_credentials` | Set `LOGIN_USERNAME` in `.env`. |
+| `auth_session_not_captured reason=missing_password_for_password_mode` | Set `LOGIN_PASSWORD` in `.env`. Only form + SSO modes need one; email-only / magic-link / OTP flows do not. |
+| `auth_session_awaiting_external` | Complete the external step (email link, OTP, MFA) once via `HEADLESS=false pytest tests/auth_setup -m auth_setup`. The cookies the runner already collected are still saved, so the follow-up starts warm. |
+| `auth_probe_navigated status=200` then no `auth_mode_detected` | Login page has no recognisable controls. Check the screenshot/HTML in `manifest/logs/nav_timeout_*` or `auth_failure_*`, then either widen the detection in `auth_probe.py` or override the tenant selectors via `AUTH_MSFT_*` env vars. |
+| SSO login fails on custom Entra tenant | Set `AUTH_MSFT_EMAIL_SELECTOR` / `AUTH_MSFT_NEXT_SELECTOR` / `AUTH_MSFT_PASSWORD_SELECTOR` / `AUTH_MSFT_SUBMIT_SELECTOR` / `AUTH_MSFT_KMSI_SELECTOR` in `.env` to match the tenant's markup. |
+| `run_done_with_issues needs_implementation=N` | Some step texts could not be bound or synthesized. Inspect the `steps_incomplete` log lines for the file paths, then `autocoder heal --slug <slug>` or hand-edit the placeholder bodies. |
 | `NotImplementedError: Implement step: ...` | `autocoder heal --slug <slug>` |
 | Playwright timeout / disabled / pointer-intercepted | `autocoder heal --from-pytest --slug <slug>` |
-| Generated POM points at the wrong widget (e.g. `fill_email` on a checkbox) | `autocoder generate --force <url>` — the inspector now distinguishes `<input type=checkbox>` from text inputs. |
+| Generated POM points at the wrong widget (e.g. `fill_email` on a checkbox) | `autocoder generate --force <url>` — the inspector distinguishes `<input type=checkbox>` from text inputs. |
 
 Full docs: `readme/README.md` (15 numbered docs + `17_heal.md`).

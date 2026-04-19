@@ -31,13 +31,14 @@ from typing import Iterable
 from autocoder import logger
 from autocoder.config import Settings, ensure_dirs
 from autocoder.extract.auth_probe import build_auth_spec
-from autocoder.extract.browser import open_session
+from autocoder.extract.auth_runner import run_auth
+from autocoder.extract.browser import AuthUnreachable, goto_resilient, open_session
 from autocoder.extract.inspector import extract_page
 from autocoder.generate.auth_setup import render_auth_setup
 from autocoder.generate.feature import render_feature
 from autocoder.generate.pom import render_pom
 from autocoder.generate.steps import render_steps
-from autocoder.intake.classifier import classify_urls
+from autocoder.intake.classifier import classify_urls, looks_like_login_url
 from autocoder.intake.graph import build_dependency_graph, topological_order
 from autocoder.llm.ollama_client import OllamaClient
 from autocoder.llm.plans import generate_feature_plan, generate_pom_plan
@@ -112,15 +113,42 @@ def run_generate(settings: Settings, opts: GenerateOptions) -> list[StageResult]
         detected_login=logger.safe_url(detected_login) if detected_login else "",
     )
 
+    # Stage 1b: homepage probe — if ``base_url`` is set and it was not
+    # already one of the input URLs, check whether fetching it
+    # anonymously redirects to a login-shaped URL. A positive here is
+    # enough to mark the whole run auth-required even if every input
+    # URL happened to render a neutral shell.
+    homepage_detected_login = _probe_homepage(registry, settings, opts.urls)
+    if homepage_detected_login:
+        detected_login = detected_login or homepage_detected_login
+
     # Stage 2: auth-first — establish AuthSpec if anything needs it
     needs_auth = any(n.requires_auth for n in registry.nodes.values())
-    logger.stage("auth_first", needs_auth=needs_auth)
+    has_login_signal = (
+        bool(settings.login_url)
+        or bool(detected_login)
+        or any(
+            n.kind in (URLKind.LOGIN, URLKind.REDIRECT_TO_LOGIN)
+            or (n.kind == URLKind.UNKNOWN and looks_like_login_url(n.url))
+            for n in registry.nodes.values()
+        )
+    )
+    logger.stage(
+        "auth_first",
+        needs_auth=needs_auth,
+        has_login_signal=has_login_signal,
+    )
     if registry.auth is None:
         registry.auth = _maybe_seed_auth(registry, settings, detected_login)
     if registry.auth is not None:
         _materialise_auth(registry, settings, store)
     else:
-        logger.info("auth_skipped", reason="no_authenticated_urls")
+        logger.info(
+            "auth_skipped",
+            reason="no_login_signal" if not has_login_signal else "no_authenticated_urls",
+            needs_auth=needs_auth,
+            has_login_signal=has_login_signal,
+        )
 
     # Stage 3+: per-URL pipeline in dependency order
     deps = build_dependency_graph(
@@ -175,7 +203,7 @@ def run_generate(settings: Settings, opts: GenerateOptions) -> list[StageResult]
                 continue
 
             try:
-                result = _process_url(node, registry, settings, client, opts)
+                result = _process_url(node, registry, settings, store, client, opts)
             except Exception as exc:  # noqa: BLE001
                 # One URL must not be able to abort the whole run.
                 # Mark it failed, log, persist, and continue with the
@@ -215,11 +243,30 @@ def run_generate(settings: Settings, opts: GenerateOptions) -> list[StageResult]
             client.close()
 
     store.save(registry)
-    logger.ok(
-        "run_done",
-        processed=len(results),
-        duration=f"{time.monotonic() - run_started:.2f}s",
-    )
+    complete = sum(1 for r in results if r.node.status == Status.COMPLETE)
+    needs_impl = sum(1 for r in results if r.node.status == Status.NEEDS_IMPLEMENTATION)
+    failed = sum(1 for r in results if r.node.status == Status.FAILED)
+    duration = f"{time.monotonic() - run_started:.2f}s"
+    if needs_impl or failed:
+        logger.warn(
+            "run_done_with_issues",
+            processed=len(results),
+            complete=complete,
+            needs_implementation=needs_impl,
+            failed=failed,
+            duration=duration,
+            hint=(
+                "Generation finished, but some URLs produced placeholder steps or "
+                "failed outright. See steps_incomplete / url_failed entries above."
+            ),
+        )
+    else:
+        logger.ok(
+            "run_done",
+            processed=len(results),
+            complete=complete,
+            duration=duration,
+        )
     return results
 
 
@@ -233,36 +280,135 @@ def run_status(settings: Settings) -> Registry:
 # ---------------------------------------------------------------------------
 
 
+def _probe_homepage(
+    registry: Registry,
+    settings: Settings,
+    input_urls: list[str],
+) -> str | None:
+    """Quickly check whether the base URL is gated by authentication.
+
+    Returns a discovered login URL if the homepage redirects to one
+    (or renders a login form), ``None`` otherwise. The purpose is to
+    catch sites whose input-URL list did not include the base URL and
+    where every classified URL happens to render a neutral anonymous
+    shell — we still want auth-first to fire.
+    """
+    base = (settings.base_url or "").rstrip("/")
+    if not base:
+        return None
+    # Skip when the base URL (or something that normalises to it) is
+    # already an input — the regular classifier handled it.
+    existing = {u.rstrip("/") for u in input_urls if u}
+    if base in existing:
+        return None
+
+    logger.info("stage:homepage_probe", base_url=logger.safe_url(base))
+    try:
+        # Reuse the classifier's single-URL path by running it through
+        # the same function; minimal overhead and consistent logging.
+        probe_nodes, probe_login = classify_urls([base], settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.warn("homepage_probe_failed", err=str(exc))
+        return None
+
+    if not probe_nodes:
+        return None
+    probe = probe_nodes[0]
+
+    # Persist a homepage node only when it contributes something the
+    # rest of the pipeline needs. We do not want to silently add URLs
+    # the user never asked for.
+    if probe.kind in (URLKind.LOGIN, URLKind.REDIRECT_TO_LOGIN):
+        # Base URL itself is login-shaped — seed the login URL and
+        # return without adding the homepage node to the registry.
+        seed = probe.redirects_to or probe.url
+        logger.info(
+            "homepage_probe_auth_detected",
+            base_url=logger.safe_url(base),
+            kind=probe.kind.value,
+            detected_login=logger.safe_url(seed),
+        )
+        return seed
+
+    # Base URL rendered without redirect. Drop the probe node to avoid
+    # polluting the registry but keep the signal for the caller.
+    logger.info(
+        "homepage_probe_clear",
+        base_url=logger.safe_url(base),
+        kind=probe.kind.value,
+        requires_auth=probe.requires_auth,
+    )
+    return None
+
+
 def _maybe_seed_auth(
     registry: Registry,
     settings: Settings,
     detected_login: str | None,
 ) -> AuthSpec | None:
-    needs_auth = any(n.requires_auth for n in registry.nodes.values())
+    """Seed an :class:`AuthSpec` if *any* signal points at a login URL.
+
+    Signals considered (first match wins for the login URL itself):
+
+    1. ``LOGIN_URL`` in settings — the user's explicit declaration.
+    2. A login URL discovered by the classifier via password-field probe.
+    3. A node with ``kind=LOGIN`` or ``kind=REDIRECT_TO_LOGIN``.
+    4. A node that pattern-matches ``looks_like_login_url`` even if the
+       classifier timed out before it could confirm the form.
+
+    We also gate on ``needs_auth``: any of the above signals, *or* any
+    node already flagged ``requires_auth=True`` (for example because a
+    protected URL was unreachable anonymously while a login URL is
+    configured), is enough to justify running auth-first.
+    """
+    candidates: list[tuple[str, str]] = []
+    if settings.login_url:
+        candidates.append((settings.login_url, "env:LOGIN_URL"))
+    if detected_login:
+        candidates.append((detected_login, "classifier_detection"))
+    for n in registry.nodes.values():
+        if n.kind in (URLKind.LOGIN, URLKind.REDIRECT_TO_LOGIN):
+            candidates.append(
+                (n.redirects_to or n.url, f"node:{n.slug}:{n.kind.value}")
+            )
+    for n in registry.nodes.values():
+        if n.kind == URLKind.UNKNOWN and looks_like_login_url(n.url):
+            candidates.append((n.url, f"node:{n.slug}:path_hint"))
+
+    needs_auth = (
+        any(n.requires_auth for n in registry.nodes.values())
+        or any(
+            n.kind in (URLKind.LOGIN, URLKind.REDIRECT_TO_LOGIN, URLKind.AUTHENTICATED)
+            for n in registry.nodes.values()
+        )
+        or bool(settings.login_url)
+    )
+
     if not needs_auth:
         return None
-    login_url = None
-    source = ""
-    if settings.login_url:
-        login_url, source = settings.login_url, "env:LOGIN_URL"
-    elif detected_login:
-        login_url, source = detected_login, "classifier_detection"
-    if not login_url:
-        for n in registry.nodes.values():
-            if n.kind == URLKind.LOGIN:
-                login_url, source = n.url, "input_url_list"
-                break
-    if not login_url:
+
+    if not candidates:
         logger.warn(
             "auth_needed_but_no_login_url",
             hint="Set LOGIN_URL in .env or include the login URL in the input list.",
         )
         return None
+
+    # De-dupe while preserving priority order.
+    seen: set[str] = set()
+    ordered: list[tuple[str, str]] = []
+    for url, source in candidates:
+        if url and url not in seen:
+            seen.add(url)
+            ordered.append((url, source))
+
+    login_url, source = ordered[0]
     logger.info(
         "auth_seeded",
         login_url=logger.safe_url(login_url),
         source=source,
         storage_state=str(settings.paths.storage_state),
+        candidates=len(ordered),
     )
     return AuthSpec(login_url=login_url, storage_state_path=str(settings.paths.storage_state))
 
@@ -288,9 +434,35 @@ def _materialise_auth(
     logger.info("auth_probe_start", url=logger.safe_url(auth.login_url))
     with open_session(settings, use_storage_state=False) as sess:
         try:
-            sess.page.goto(auth.login_url, wait_until="domcontentloaded")
+            diag = goto_resilient(
+                sess.page,
+                auth.login_url,
+                nav_timeout_ms=settings.browser.extraction_nav_timeout_ms,
+                diagnostics_dir=settings.paths.logs_dir,
+            )
+            logger.info(
+                "auth_probe_navigated",
+                url=logger.safe_url(auth.login_url),
+                **diag.to_dict(),
+            )
+        except AuthUnreachable as exc:
+            logger.warn(
+                "auth_probe_failed",
+                url=logger.safe_url(auth.login_url),
+                err=str(exc),
+                **exc.diag.to_dict(),
+                hint=(
+                    "Login page did not commit in time — likely an SSO redirect "
+                    "or slow SPA shell. Check the screenshot/HTML in the logs dir."
+                ),
+            )
+            return
         except Exception as exc:  # noqa: BLE001
-            logger.warn("auth_probe_failed", url=logger.safe_url(auth.login_url), err=str(exc))
+            logger.warn(
+                "auth_probe_failed",
+                url=logger.safe_url(auth.login_url),
+                err=str(exc),
+            )
             return
         seeded = build_auth_spec(
             sess.page,
@@ -302,25 +474,49 @@ def _materialise_auth(
         logger.warn(
             "auth_form_not_detected",
             url=logger.safe_url(auth.login_url),
-            hint="Login page may use SSO redirect or non-standard markup.",
+            hint=(
+                "Login page did not expose a password input OR a recognised "
+                "SSO provider button. Set AUTH_MSFT_* overrides if the tenant "
+                "uses custom markup."
+            ),
         )
         return
     logger.ok(
-        "auth_form_detected",
+        "auth_mode_detected",
         url=logger.safe_url(auth.login_url),
-        username_strategy=seeded.username_selector.strategy.value if seeded.username_selector else "?",
-        password_strategy=seeded.password_selector.strategy.value if seeded.password_selector else "?",
-        submit_strategy=seeded.submit_selector.strategy.value if seeded.submit_selector else "?",
+        auth_kind=seeded.auth_kind,
+        requires_external_completion=seeded.requires_external_completion,
+        username_strategy=(
+            seeded.username_selector.strategy.value if seeded.username_selector else None
+        ),
+        password_strategy=(
+            seeded.password_selector.strategy.value if seeded.password_selector else None
+        ),
+        submit_strategy=(
+            seeded.submit_selector.strategy.value if seeded.submit_selector else None
+        ),
+        continue_strategy=(
+            seeded.continue_selector.strategy.value if seeded.continue_selector else None
+        ),
+        sso_strategy=(
+            seeded.sso_button_selector.strategy.value if seeded.sso_button_selector else None
+        ),
         username_env_present=settings.secret_present("LOGIN_USERNAME"),
         password_env_present=settings.secret_present("LOGIN_PASSWORD"),
+        notes=",".join(seeded.notes or []) or None,
     )
 
     merged = auth.model_copy(
         update={
+            "auth_kind": seeded.auth_kind,
             "username_selector": seeded.username_selector,
             "password_selector": seeded.password_selector,
             "submit_selector": seeded.submit_selector,
+            "continue_selector": seeded.continue_selector,
+            "sso_button_selector": seeded.sso_button_selector,
+            "requires_external_completion": seeded.requires_external_completion,
             "success_indicator_url_contains": seeded.success_indicator_url_contains,
+            "notes": list(seeded.notes or []),
         }
     )
 
@@ -339,6 +535,70 @@ def _materialise_auth(
         action="updated" if existed else "created",
     )
 
+    # Actually perform the login so the rest of the run has a session.
+    # If credentials are missing we log and return — the rendered
+    # auth-setup test is still on disk for the user to run manually.
+    result = run_auth(merged, settings)
+    if result.ok:
+        logger.ok(
+            "auth_session_captured",
+            storage_state=str(settings.paths.storage_state),
+            final_url=logger.safe_url(result.final_url),
+            auth_kind=merged.auth_kind,
+            elapsed=f"{result.elapsed_s:.2f}s",
+        )
+        # Stale-mark nodes extracted anonymously. The re-extraction
+        # branch inside ``_process_url`` will pick up the authenticated
+        # DOM on this same run thanks to ``use_storage`` widening.
+        stale = 0
+        for n in registry.nodes.values():
+            if n.kind == URLKind.LOGIN:
+                continue
+            if n.status in (Status.COMPLETE, Status.NEEDS_IMPLEMENTATION, Status.EXTRACTED):
+                n.status = Status.PENDING
+                n.last_fingerprint = None
+                n.notes.append("stale_after_auth_capture")
+                stale += 1
+        if stale:
+            store.save(registry)
+            logger.info("auth_post_capture_invalidated", count=stale)
+    elif result.reason == "awaiting_external_completion":
+        # Partial progress. Mark the spec so the run summary surfaces
+        # it and the user knows to finish the external step.
+        registry.auth = merged.model_copy(
+            update={
+                "requires_external_completion": True,
+                "status": Status.NEEDS_IMPLEMENTATION,
+                "notes": list(merged.notes or []) + [
+                    f"runner_paused_after={result.diagnostics.get('second_step', '?')}",
+                ],
+            }
+        )
+        store.save(registry)
+        logger.warn(
+            "auth_session_awaiting_external",
+            reason=result.reason,
+            auth_kind=merged.auth_kind,
+            final_url=logger.safe_url(result.final_url),
+            elapsed=f"{result.elapsed_s:.2f}s",
+            hint=(result.diagnostics or {}).get(
+                "hint", "complete the external step and rerun"
+            ),
+        )
+    else:
+        logger.warn(
+            "auth_session_not_captured",
+            reason=result.reason,
+            final_url=logger.safe_url(result.final_url),
+            elapsed=f"{result.elapsed_s:.2f}s",
+            hint=(
+                "Set LOGIN_USERNAME/LOGIN_PASSWORD in .env and rerun, "
+                "or run `pytest tests/auth_setup -m auth_setup` with HEADLESS=false "
+                "to complete the flow manually."
+            ),
+            **{f"diag_{k}": v for k, v in (result.diagnostics or {}).items()},
+        )
+
 
 # ---------------------------------------------------------------------------
 # Per-URL pipeline
@@ -349,21 +609,48 @@ def _process_url(
     node: URLNode,
     registry: Registry,
     settings: Settings,
+    store: RegistryStore,
     client: OllamaClient | None,
     opts: GenerateOptions,
 ) -> StageResult:
     issues: list[str] = []
-    use_storage = node.requires_auth or node.kind == URLKind.AUTHENTICATED
+    # Storage is used when:
+    #   * the node itself is known to need auth, OR
+    #   * auth-first has materialised a usable storage_state — in which
+    #     case we reuse it for every non-LOGIN node, INCLUDING those
+    #     classified PUBLIC. The anonymous classification was made
+    #     against the pre-login shell; a PUBLIC verdict there is not
+    #     evidence that the authenticated view is identical. Adding
+    #     cookies to a genuinely-public request is free.
+    auth_ready = (
+        registry.auth is not None
+        and registry.auth.status == Status.STEPS_READY
+        and settings.paths.storage_state.exists()
+        and settings.paths.storage_state.stat().st_size > 0
+    )
+    use_storage = (
+        node.requires_auth
+        or node.kind == URLKind.AUTHENTICATED
+        or (auth_ready and node.kind != URLKind.LOGIN)
+    )
+    reason = (
+        "requires_auth" if node.requires_auth
+        else "kind=authenticated" if node.kind == URLKind.AUTHENTICATED
+        else "auth_ready_session_reuse" if auth_ready
+        else "anonymous"
+    )
     logger.info(
         "extraction_storage_decision",
         slug=node.slug,
         use_storage=use_storage,
-        reason="requires_auth" if node.requires_auth else (
-            "kind=authenticated" if node.kind == URLKind.AUTHENTICATED else "anonymous"
-        ),
+        reason=reason,
     )
 
-    extraction = _extract(node, settings, use_storage)
+    extraction, failure = _extract_detailed(node, settings, use_storage)
+    if extraction is None and failure is not None:
+        extraction = _maybe_escalate_to_auth(
+            node, registry, settings, store, failure, use_storage
+        )
     if extraction is None:
         node.status = Status.FAILED
         logger.error("url_failed", slug=node.slug, stage="extract")
@@ -489,24 +776,45 @@ def _process_url(
     steps_path = settings.paths.steps_dir / f"test_{node.slug}.py"
     rel_feature = feature_path.relative_to(settings.paths.features_dir)
     existed = steps_path.exists()
-    steps_path.write_text(
-        render_steps(
-            feature_title=feature_plan.feature,
-            feature_path=str(rel_feature).replace("\\", "/"),
-            feature_plan=feature_plan,
-            pom_plan=pom_plan,
-            pom_module=f"{node.slug}_page",
-        ),
-        encoding="utf-8",
+    rendered_steps = render_steps(
+        feature_title=feature_plan.feature,
+        feature_path=str(rel_feature).replace("\\", "/"),
+        feature_plan=feature_plan,
+        pom_plan=pom_plan,
+        pom_module=f"{node.slug}_page",
+        elements=list(extraction.elements),
     )
+    steps_path.write_text(rendered_steps, encoding="utf-8")
     node.steps_path = str(steps_path)
-    node.status = Status.COMPLETE
     node.last_fingerprint = extraction.fingerprint
+
+    placeholder_count = rendered_steps.count("NotImplementedError")
+    if placeholder_count > 0:
+        node.status = Status.NEEDS_IMPLEMENTATION
+        issues.append(
+            f"steps_placeholders={placeholder_count} (test file will fail until bound)"
+        )
+        logger.warn(
+            "steps_incomplete",
+            slug=node.slug,
+            path=str(steps_path),
+            placeholder_count=placeholder_count,
+            hint=(
+                "Some step texts could not be bound to POM methods or "
+                "synthesized automatically. Inspect the placeholder bodies "
+                "in the generated test file."
+            ),
+        )
+    else:
+        node.status = Status.COMPLETE
+
     logger.ok(
         "steps_written",
         slug=node.slug,
         path=str(steps_path),
         action="updated" if existed else "created",
+        status=node.status.value,
+        placeholders=placeholder_count,
     )
 
     extraction_path.replace(prev_path)
@@ -522,7 +830,141 @@ def _process_url(
     )
 
 
+def _maybe_escalate_to_auth(
+    node: URLNode,
+    registry: Registry,
+    settings: Settings,
+    store: RegistryStore,
+    failure: dict,
+    already_used_storage: bool,
+) -> PageExtraction | None:
+    """Convert an anonymous extract failure into an auth-first retry.
+
+    The core rule: if a URL could not be reached anonymously and there
+    is *any* evidence that authentication is the reason, the system
+    must run the login flow before giving up on the URL.
+
+    Evidence we accept:
+
+    * ``kind == "auth_blocked"`` — goto landed on a login-shaped URL.
+    * ``kind == "auth_unreachable"`` and either (a) the redirect chain
+      touched a login-shaped URL, (b) a ``LOGIN_URL`` is configured, or
+      (c) a login URL was already discovered during classification.
+
+    Returns the new :class:`PageExtraction` on success, or ``None`` if
+    we could not escalate.
+    """
+    if already_used_storage:
+        return None  # we already tried with a session; do not loop.
+
+    kind = failure.get("kind", "other")
+    redirects = failure.get("redirects") or []
+    final_url = failure.get("final_url") or ""
+
+    evidence = (
+        kind == "auth_blocked"
+        or any(looks_like_login_url(u) for u in redirects)
+        or looks_like_login_url(final_url)
+        or bool(settings.login_url)
+        or any(
+            n.kind in (URLKind.LOGIN, URLKind.REDIRECT_TO_LOGIN)
+            for n in registry.nodes.values()
+        )
+    )
+    if not evidence:
+        return None
+
+    # Mark the node as needing auth so the registry reflects reality.
+    node.requires_auth = True
+    if kind == "auth_blocked" and final_url:
+        node.redirects_to = final_url
+        if node.kind == URLKind.UNKNOWN:
+            node.kind = URLKind.REDIRECT_TO_LOGIN
+    store.upsert_node(registry, node)
+
+    if registry.auth is None:
+        # Prefer the redirect target as the login URL if we saw one;
+        # otherwise fall through to the normal seeding logic.
+        discovered = next(
+            (u for u in redirects if looks_like_login_url(u)),
+            final_url if looks_like_login_url(final_url) else None,
+        )
+        registry.auth = _maybe_seed_auth(registry, settings, discovered)
+        if registry.auth is None:
+            logger.warn(
+                "auth_escalation_no_login_url",
+                slug=node.slug,
+                hint="Set LOGIN_URL in .env — cannot run auth-first without it.",
+            )
+            return None
+        store.save(registry)
+
+    if registry.auth.status != Status.STEPS_READY:
+        logger.info(
+            "auth_escalation_materialise",
+            slug=node.slug,
+            login_url=logger.safe_url(registry.auth.login_url),
+        )
+        _materialise_auth(registry, settings, store)
+
+    if not _storage_state_usable(settings):
+        logger.warn(
+            "auth_escalation_no_storage",
+            slug=node.slug,
+            hint=(
+                "Run `pytest tests/auth_setup -m auth_setup` to populate "
+                "storage_state, then rerun."
+            ),
+        )
+        return None
+
+    logger.info("auth_escalation_retry", slug=node.slug, use_storage=True)
+    retry, retry_failure = _extract_detailed(node, settings, use_storage=True)
+    if retry is not None:
+        logger.ok("auth_escalation_succeeded", slug=node.slug)
+        return retry
+    logger.error(
+        "auth_escalation_failed",
+        slug=node.slug,
+        err=(retry_failure or {}).get("err", "unknown"),
+    )
+    return None
+
+
+def _storage_state_usable(settings: Settings) -> bool:
+    sp = settings.paths.storage_state
+    try:
+        return sp.exists() and sp.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def _extract(node: URLNode, settings: Settings, use_storage: bool) -> PageExtraction | None:
+    """Extract one URL. Returns ``None`` on any failure.
+
+    For callers that need to distinguish *authentication-blocked*
+    failures from generic ones, see :func:`_extract_with_escalation`.
+    """
+    result, _ = _extract_detailed(node, settings, use_storage)
+    return result
+
+
+def _extract_detailed(
+    node: URLNode,
+    settings: Settings,
+    use_storage: bool,
+) -> tuple[PageExtraction | None, dict | None]:
+    """Return ``(extraction, failure_info)``.
+
+    ``failure_info`` is ``None`` on success. On failure it contains
+    diagnostics the orchestrator uses to decide whether to escalate
+    into the auth-first flow:
+
+    * ``kind``: ``"auth_unreachable"`` | ``"auth_blocked"`` | ``"other"``
+    * ``final_url``: last URL Playwright saw (post-redirect).
+    * ``redirects``: the redirect chain captured by the nav probe.
+    * ``err``: string form of the original error.
+    """
     started = time.monotonic()
     logger.info(
         "extract_start",
@@ -532,7 +974,53 @@ def _extract(node: URLNode, settings: Settings, use_storage: bool) -> PageExtrac
     )
     try:
         with open_session(settings, use_storage_state=use_storage) as sess:
-            sess.page.goto(node.url, wait_until="domcontentloaded")
+            try:
+                diag = goto_resilient(
+                    sess.page,
+                    node.url,
+                    nav_timeout_ms=settings.browser.extraction_nav_timeout_ms,
+                    diagnostics_dir=settings.paths.logs_dir,
+                )
+            except AuthUnreachable as exc:
+                logger.error(
+                    "extract_failed",
+                    slug=node.slug,
+                    url=logger.safe_url(node.url),
+                    err=str(exc),
+                    kind="auth_unreachable",
+                    duration=f"{time.monotonic() - started:.2f}s",
+                    **exc.diag.to_dict(),
+                )
+                return None, {
+                    "kind": "auth_unreachable",
+                    "final_url": exc.diag.final_url,
+                    "redirects": list(exc.diag.redirects),
+                    "err": str(exc),
+                }
+
+            # Detect "we loaded something, but it is actually the login
+            # page" — very common when a protected URL is hit without
+            # a valid session.
+            final_url = diag.final_url or sess.page.url
+            if (
+                not use_storage
+                and final_url
+                and final_url != node.url
+                and looks_like_login_url(final_url)
+            ):
+                logger.warn(
+                    "extract_redirected_to_login",
+                    slug=node.slug,
+                    url=logger.safe_url(node.url),
+                    final_url=logger.safe_url(final_url),
+                )
+                return None, {
+                    "kind": "auth_blocked",
+                    "final_url": final_url,
+                    "redirects": list(diag.redirects),
+                    "err": "redirected_to_login",
+                }
+
             extraction = extract_page(
                 sess.page,
                 url=node.url,
@@ -546,18 +1034,25 @@ def _extract(node: URLNode, settings: Settings, use_storage: bool) -> PageExtrac
                 final_url=logger.safe_url(extraction.final_url),
                 title=extraction.title[:60],
                 elements=len(extraction.elements),
+                wait_strategy=diag.wait_strategy,
                 duration=f"{time.monotonic() - started:.2f}s",
             )
-            return extraction
+            return extraction, None
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "extract_failed",
             slug=node.slug,
             url=logger.safe_url(node.url),
             err=str(exc),
+            kind="other",
             duration=f"{time.monotonic() - started:.2f}s",
         )
-        return None
+        return None, {
+            "kind": "other",
+            "final_url": "",
+            "redirects": [],
+            "err": str(exc),
+        }
 
 
 # ---------------------------------------------------------------------------

@@ -33,14 +33,16 @@ autocoder/                        Project root (= the "autocoder" project)
       orchestrator.py             End-to-end pipeline that ties stages together
 
       intake/                     Stage 1: classify URLs
-        classifier.py               Real-browser probe → URLNode
+        classifier.py               Real-browser probe → URLNode (uses goto_resilient)
         graph.py                    Dependency graph + topological order
+        sources.py                  4-tier URL resolution (CLI > file > env > settings)
 
-      extract/                    Stage 3 (and stage-2 probe): UI catalog
-        browser.py                  Playwright session context manager
+      extract/                    Stage 1b/2/3: navigation + UI catalog + auth
+        browser.py                  Playwright session + goto_resilient + AuthUnreachable
         inspector.py                Compact element catalog per page
         selectors.py                Stable-selector resolver (priority order)
-        auth_probe.py               Detect login form fields for auth setup
+        auth_probe.py               Infer auth_kind (8 modes); detect form / SSO / magic-link / OTP / username-first / email-only
+        auth_runner.py              In-process login runner: dispatches by auth_kind, drives Entra for SSO, writes storage_state
 
       llm/                        Stages 4 + 6: single LLM call per stage
         ollama_client.py            HTTP client tuned for CPU-only Phi-4
@@ -111,15 +113,21 @@ that is the user-facing path in `.env` and CLI output.
 | Reading env / file paths | `autocoder/config.py` | One place to change defaults; tests can pass an in-memory `Settings`. |
 | URL classification | `autocoder/intake/classifier.py` | Needs a real browser; produces `URLNode`s for the registry. |
 | Dependency ordering | `autocoder/intake/graph.py` | Pure function over `URLNode`s; deterministic. |
+| Resilient navigation | `autocoder/extract/browser.py:goto_resilient` | Tiered `commit`/`domcontentloaded`/`networkidle` strategy + diagnostics dump on timeout. Reused by classifier, auth probe, auth runner, and extract. |
+| Auth-mode inference | `autocoder/extract/auth_probe.py` | Picks one of 8 `auth_kind` values from page shape (form / SSO / username-first / email-only / magic-link / OTP / unknown). |
+| In-process login | `autocoder/extract/auth_runner.py` | Actually performs the login during `autocoder generate` and writes `.auth/user.json`. Mode-aware credential gating. |
+| Homepage probe | `autocoder/orchestrator.py:_probe_homepage` | Catches apps whose base URL is gated but no input URL happened to be. |
 | Stable selectors | `autocoder/extract/selectors.py` | The generation-time half of the locator strategy. |
 | Self-healing locators | `tests/support/locator_strategy.py` | The runtime half; lives with the suite so generated POMs need no extra imports. |
-| LLM call | `autocoder/llm/ollama_client.py` | Only place that talks to Ollama. |
-| Plan caching | `autocoder/llm/plans.py` | Keyed by extraction fingerprint; reruns of unchanged pages cost zero tokens. |
-| Code generation | `autocoder/generate/*.py` | Templates only; never invokes the LLM. |
+| LLM call | `autocoder/llm/ollama_client.py` | Only place that talks to Ollama. Includes `_try_parse_json` recovery ladder + one strict-prompt retry. |
+| Plan caching | `autocoder/llm/plans.py` | Keyed by extraction fingerprint; reruns of unchanged pages cost zero tokens. `generate_feature_plan` falls back to a minimal plan on `OllamaError` so POM + steps still render. |
+| Plan validation | `autocoder/llm/validator.py` | Drops unknown element ids; close-match rebind via difflib for `pom_method` misses. |
+| Code generation | `autocoder/generate/*.py` | Templates only; never invokes the LLM. Includes step synthesis for navigation / assertion / negation patterns. |
+| Auth-setup templates | `autocoder/generate/auth_setup.py` | Four templates dispatched by `auth_kind` (form, SSO, username-first, email-only / magic / OTP). |
 | Persistence | `autocoder/registry/store.py` | Single Python entry point for `manifest/registry.yaml`. |
 | Stub healing | `autocoder/heal/runner.py` | Fills `NotImplementedError` stubs the renderer left. |
 | Failure healing | `autocoder/heal/runner.py` + `pytest_failures.py` | Runs pytest, parses JUnit XML, asks the LLM for revised step bodies. |
 | URL source resolution | `autocoder/intake/sources.py` | 4-tier fallback (CLI > file > env > settings); structure-aware splitting. |
 | Local-only verification | `scripts/verify_local_llm.py` | Records every outbound TCP destination during a live `/api/chat`. |
-| Pipeline glue | `autocoder/orchestrator.py` | The only module that knows about all stages; per-URL exceptions are caught so one failure doesn't abort the run. |
+| Pipeline glue | `autocoder/orchestrator.py` | The only module that knows about all stages; per-URL exceptions are caught so one failure doesn't abort the run. Also owns the placeholder quality gate + `run_done_with_issues` summary. |
 | User-facing commands | `autocoder/cli.py` | Thin layer over `orchestrator.py` + `heal/runner.py`. |

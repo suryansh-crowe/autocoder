@@ -94,16 +94,35 @@ events when you want to know "why?":
 
 | Event                         | What you learn                              |
 |-------------------------------|---------------------------------------------|
-| `classify`                    | Why a URL was classified as login / public / redirect-to-login. The `reason` field is human-readable. |
-| `auth_seeded`                 | Where the login URL came from (`env:LOGIN_URL` / `classifier_detection` / `input_url_list`). |
-| `auth_form_detected`          | Which strategy resolved each of username / password / submit. |
-| `extraction_storage_decision` | Whether the storage-state file was loaded for this URL, and why. |
+| `classify`                    | Why a URL was classified as login / public / redirect-to-login. The `reason` field is human-readable; `wait_strategy` shows which `goto_resilient` tier succeeded. |
+| `classify_timeout` / `classify_timeout_login_inferred` / `classify_timeout_escalated_to_auth` | Nav timed out; whether a URL-path hint or a configured `LOGIN_URL` let us escalate. |
+| `nav_timeout_artifacts`       | Path base for screenshot + HTML written when `goto_resilient` timed out at the `commit` tier. |
+| `stage:homepage_probe` / `homepage_probe_auth_detected` / `homepage_probe_clear` | Whether the base URL itself is gated. |
+| `stage:auth_first`            | Whether any login signal exists and whether `needs_auth` is true. |
+| `auth_seeded`                 | Where the login URL came from (`env:LOGIN_URL` / `classifier_detection` / `node:<slug>:login` / `node:<slug>:path_hint`). |
+| `auth_probe_navigated` / `auth_probe_failed` | Whether we reached the login page; failure payload includes redirect chain, popup URLs, console errors, failed requests. |
+| `auth_mode_detected`          | Detected `auth_kind`, all captured selectors, `requires_external_completion`, whether credentials are present. Subsumes the older `auth_form_detected`. |
+| `auth_probe_magic_link_detected` / `auth_probe_otp_detected` / `auth_probe_sso_detected` / `auth_probe_username_first_detected` / `auth_probe_email_only_detected` | Subtype signals for the relevant detection branch. |
+| `auth_setup_written`          | Rendered `tests/auth_setup/test_auth_setup.py` action (created / updated). |
+| `auth_runner_start`           | Live login attempt begins; logs `auth_kind` and credential presence. |
+| `auth_session_captured`       | Login succeeded; `.auth/user.json` written. |
+| `auth_post_capture_invalidated` | Count of non-LOGIN nodes whose status was reset so re-extraction happens under the new session. |
+| `auth_session_awaiting_external` | Runner reached a step it cannot automate (magic link, OTP, MFA). Any cookies set so far have been persisted. |
+| `auth_session_not_captured`   | Runner bailed (`missing_credentials`, `missing_password_for_password_mode`, `login_page_unreachable`, `success_indicator_not_seen`, ...). |
+| `auth_failure_artifacts`      | Path base for screenshot + HTML dumped on runner failure. |
+| `auth_escalation_retry` / `auth_escalation_succeeded` / `auth_escalation_failed` / `auth_escalation_materialise` / `auth_escalation_no_login_url` / `auth_escalation_no_storage` | Extraction hit a login page; whether we seeded auth and retried under session. |
+| `extract_redirected_to_login` | Anonymous extraction landed on a login-shaped URL. |
+| `extraction_storage_decision` | Whether storage was loaded for this URL, and why (`requires_auth` / `kind=authenticated` / `auth_ready_session_reuse` / `anonymous`). |
 | `selector_picked`             | Which strategy won for a given element (debug level). |
 | `selector_fragile`            | Primary selector fell back to CSS or XPath — surfaced for review (debug level). |
 | `diff_report`                 | Per-URL change summary vs. previous run.    |
 | `rerun_unchanged`             | Why an already-complete URL was skipped.    |
 | `pom_plan_cache_hit` / `_miss` | Why a stage spent or saved LLM tokens.     |
-| `pom_written` / `feature_written` / `steps_written` | `action=created` vs. `action=updated`, plus counts. |
+| `ollama_json_retry` / `ollama_json_recovered` / `ollama_json_parse_failed` | JSON recovery ladder progress; the `recovered` case means the strict-prompt retry parsed successfully. |
+| `feature_plan_fallback`       | `OllamaError` on the feature plan was caught; a minimal `FeaturePlan` was substituted so the POM + steps still render. |
+| `pom_written` / `feature_written` / `steps_written` | `action=created` vs. `action=updated`, plus counts. `steps_written` additionally carries `status` (`complete` / `needs_implementation`) and `placeholders` count. |
+| `steps_incomplete`            | Quality gate fired: the rendered step file still has ≥ 1 placeholder body. |
+| `run_done` / `run_done_with_issues` | Terminal summary. `run_done_with_issues` is used whenever any URL ended up `needs_implementation` or `failed`. |
 | `urls_source`                 | Which URL source the CLI used (`cli` / `file:…` / `env` / `settings`). |
 | `url_skipped`                 | Why an in-order URL was skipped (e.g. `login_url_covered_by_auth_setup`). |
 | `url_failed`                  | A URL's processing raised; logged with `err_type` so the run keeps going. |

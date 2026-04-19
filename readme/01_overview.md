@@ -60,16 +60,36 @@ two planning calls. Everything else is deterministic Python.
 - URL classification (public / authenticated / redirect-to-login /
   login) and dependency mapping (login first, redirect targets
   before sources).
-- Auth-first generation: an `auth_setup` test is rendered before
-  protected pages are explored.
+- Resilient navigation: `goto_resilient` commits on first byte, then
+  best-effort escalates to `domcontentloaded` and `networkidle`.
+  Raises `AuthUnreachable` with a diagnostics dump (redirect chain,
+  popups, console errors, screenshot + HTML) when even `commit`
+  times out.
+- Auth-first generation that automatically detects one of eight
+  login shapes — classic form, username-first, email-only,
+  magic-link, OTP, Microsoft/Azure SSO, generic SSO, unknown — and
+  actually performs the login in-process, writing `.auth/user.json`
+  for the rest of the run and for subsequent pytest invocations.
+  Non-password flows (SSO, email-only, magic-link, OTP) are handled
+  without requiring `LOGIN_PASSWORD`.
+- Homepage reachability probe: when `base_url` is not in the input
+  URL list, it is classified once to catch apps whose landing page
+  is gated but whose deep-linked inputs happen to render a neutral
+  anonymous shell.
 - DOM/UI extraction limited to interactive elements; element kind
   honours `<input type=...>` so checkboxes/radios/submits get the
   right Playwright primitive.
 - Stable selector discovery with up to four fallbacks per element.
 - POM creation/update with selector dictionaries kept in one place.
 - BDD feature generation by tier (smoke / sanity / regression / etc).
-- Playwright step generation that calls POM methods, with explicit
-  `NotImplementedError` stubs for steps that cannot be safely bound.
+- Playwright step generation that calls POM methods, **synthesizes**
+  executable Playwright calls for common patterns (`navigate`, the
+  full `is/should be/must be [not] checked|visible|enabled|disabled`
+  family, negation no-ops), and falls back to `NotImplementedError`
+  only when neither binding nor synthesis applies.
+- Generation quality gate: a URL whose step file still has
+  `NotImplementedError` bodies ends up `needs_implementation`, not
+  `complete`, and the run summary switches to `run_done_with_issues`.
 - **Heal stage** (`autocoder heal`) — fills the stubs via the LLM
   with AST-validated single-statement bodies.
 - **Runtime-failure heal** (`autocoder heal --from-pytest`) — runs

@@ -40,6 +40,37 @@ source of priority at runtime.
 3. `autocoder/llm/prompts.py` — add the verb to the action enum in
    `POM_SYSTEM`.
 
+## Add a new auth mode (or adjust an existing one)
+
+The auth pipeline has three coordinated layers. A new mode touches
+each:
+
+1. `autocoder/models.py` — extend `AuthSpec.auth_kind` with the new
+   `Literal` value. Add any new selector fields the runner will need
+   (follow the pattern of `continue_selector` / `sso_button_selector`).
+2. `autocoder/extract/auth_probe.py` — add a detection rule to
+   `build_auth_spec(page, ...)`. Rules run in order and the first
+   match wins, so place the new one where it should dominate. Prefer
+   role-name matches (`page.get_by_role("button", name=_ICASE_RE("..."))`)
+   over CSS anchors.
+3. `autocoder/extract/auth_runner.py` — add a `_run_<mode>_flow`
+   helper that takes `(page, spec, username, password?)` and either
+   completes the flow or returns a second-step signal
+   (`password_completed` / `awaiting_external` / `sso_chained`).
+   Wire it into the dispatch block of `run_auth`. Update
+   `_PASSWORD_MODES` / `_USERNAME_ONLY_MODES` so `_credentials`
+   validates the right env vars.
+4. `autocoder/generate/auth_setup.py` — add a template and a branch
+   in `render_auth_setup(spec, ...)`. The existing templates
+   (`_TEMPLATE_FORM`, `_TEMPLATE_SSO_MS`, `_TEMPLATE_USERNAME_FIRST`,
+   `_TEMPLATE_EMAIL_ONLY`) are good copy-paste starting points.
+
+Detection ordering matters: check the most specific phrases first
+(e.g. "Send magic link") before falling through to structural hints
+(a lone email input). For entirely new providers, extend
+`_SSO_PROVIDERS` in `auth_probe.py` with the provider's phrases and
+a CSS fallback.
+
 ## Swap the LLM model
 
 Change `OLLAMA_MODEL` in `.env`. Nothing else is required as long as

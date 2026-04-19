@@ -20,16 +20,26 @@ wrong-kind / locator-not-found / timeout). See `17_heal.md`.
 
 ## First run after generation
 
-If any URL in scope is authenticated, capture a session once before
-running the rest of the suite:
+For form and Microsoft SSO flows, `autocoder generate` has already
+performed the login in-process and written `.auth/user.json`. You can
+jump straight to `pytest`.
+
+If the run log ended with `auth_session_awaiting_external` — magic
+link, OTP, or MFA that the runner can't complete on its own — finish
+it headful once:
 
 ```bash
-pytest tests/auth_setup -m auth_setup
+HEADLESS=false pytest tests/auth_setup -m auth_setup
 ```
 
-That writes `tests/.auth/user.json`. Subsequent runs read it
-automatically (see `tests/conftest.py` — the `browser_context_args`
-fixture injects `storage_state` if the file exists).
+The rendered setup test was picked from the template that matches the
+detected `auth_kind`, so it already knows whether to wait for a
+password field, an email link, or a code. `.auth/user.json` is
+written at the end; the `browser_context_args` fixture in
+`tests/conftest.py` loads it for every subsequent test.
+
+Session expired? Delete `.auth/user.json` and rerun `autocoder
+generate` — the auth runner re-authenticates.
 
 ## Tier markers
 
@@ -105,18 +115,22 @@ tests still pass without manual intervention.
 
 ## Why generated steps may raise NotImplementedError
 
-The feature-plan validator nulls out `pom_method` references the LLM
-invented. The renderer then emits a step body of:
+The renderer tries three things before giving up on a step:
 
-```python
-raise NotImplementedError("Implement step: <step text>")
-```
+1. Call the bound `pom_method` if the validator kept it (or
+   close-match rebound it).
+2. Synthesize an executable body from the step text — navigation,
+   assertion patterns, or a negation no-op. See `10_generation.md`.
+3. Emit `raise NotImplementedError("Implement step: <step text>")`.
 
-This is intentional. The system never silently passes a step it
-could not bind to a real method. When you see one, either:
+Only when all three miss do you see a placeholder. The URL is then
+marked `needs_implementation` and the end-of-run summary becomes
+`run_done_with_issues`. When you see one, either:
 
-1. Add the corresponding method to the generated POM (and re-run
-   generation so the validator finds it), or
-2. Replace the body with whatever assertion the step actually means.
+1. Run `autocoder heal --slug <slug>` to ask the LLM for a single
+   validated statement; or
+2. Add the corresponding method to the generated POM (and re-run
+   generation so the validator finds it); or
+3. Replace the body by hand with whatever the step actually means.
 
 Either way, the failure is loud and the fix is local.

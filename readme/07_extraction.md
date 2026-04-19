@@ -8,19 +8,37 @@ single biggest lever on token cost downstream.
 ## Browser session
 
 `autocoder/extract/browser.py` is a context manager around the
-Playwright sync API:
+Playwright sync API, plus a resilient-navigation helper:
 
 ```python
 with open_session(settings, use_storage_state=True) as sess:
-    sess.page.goto(url, wait_until="domcontentloaded")
+    diag = goto_resilient(sess.page, url,
+                          nav_timeout_ms=settings.browser.extraction_nav_timeout_ms,
+                          diagnostics_dir=settings.paths.logs_dir)
     extraction = extract_page(sess.page, url=url, settings=settings, ...)
 ```
 
-`use_storage_state=True` injects `tests/.auth/user.json` if it exists,
-so protected pages can be explored. When the file is missing, the
-session falls back to anonymous and the orchestrator logs a warning
-rather than crashing — the auth-setup test simply has not been run
-yet.
+`goto_resilient` replaces a raw `page.goto(..., wait_until="domcontentloaded")`
+with a tiered wait strategy:
+
+1. `commit` — fires on first response byte. Robust against SPAs that
+   redirect to a different origin before the original DOM parses.
+2. best-effort `domcontentloaded` (bounded to half the nav timeout).
+3. best-effort `networkidle` (bounded to 5 s).
+
+If the `commit` tier itself times out, the helper dumps a screenshot
+and the raw HTML to `manifest/logs/nav_timeout_<ts>_<host>.png|.html`
+and raises `AuthUnreachable`, which the orchestrator reads to decide
+whether to escalate into the auth-first flow.
+
+`use_storage_state=True` injects `.auth/user.json` if it exists, so
+protected pages can be explored. When auth has been captured during
+the current run (`registry.auth.status == STEPS_READY`), the
+orchestrator sets `use_storage_state=True` for **every non-LOGIN
+node**, including those the classifier labelled `PUBLIC` — the
+anonymous verdict does not prove the authenticated view is
+identical. When the file is missing, the session falls back to
+anonymous and the orchestrator logs a warning rather than crashing.
 
 ## What the inspector captures
 

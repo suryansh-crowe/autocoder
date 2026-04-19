@@ -50,7 +50,10 @@
       "Bash(rm -f tests/features/*.feature)",
       "Bash(rm -f tests/steps/test_login.py tests/steps/test_stewie.py)",
       "Bash(rm -f tests/auth_setup/test_*.py)",
-      "Bash(rm -f tests/.auth/*.json)"
+      "Bash(rm -f tests/.auth/*.json)",
+      "Bash(python -m pytest tests/ -q --no-header -x)",
+      "Bash(python -m pytest tests/ -q --no-header)",
+      "Bash(python -m pytest tests/unit -q --no-header)"
     ]
   },
   "disabledMcpjsonServers": [

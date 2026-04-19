@@ -47,11 +47,24 @@ nodes:
     feature_path: tests/features/dashboard.feature
     steps_path: tests/steps/test_dashboard.py
     last_fingerprint: 9b2f3c4d5e6f7081
-    last_run_at: '2025-01-15T18:42:01+00:00'
+    last_run_at: '2026-04-19T18:42:01+00:00'
 auth:
   login_url: https://app.example.com/login
-  storage_state_path: .auth/user.json
+  auth_kind: sso_microsoft                 # form | username_first | email_only |
+                                           # magic_link | otp_code | sso_microsoft |
+                                           # sso_generic | unknown_auth
+  requires_external_completion: false
+  username_env: LOGIN_USERNAME
+  password_env: LOGIN_PASSWORD
+  username_selector: {strategy: css, value: 'input[type=email]'}
+  password_selector: null                  # populated only for form + later stages of SSO
+  submit_selector: null
+  continue_selector: null                  # Next / Continue / Send link / Send code
+  sso_button_selector: {strategy: role_name, value: button, name: 'Sign in with Microsoft'}
+  success_indicator_url_contains: https://app.example.com
   setup_path: tests/auth_setup/test_auth_setup.py
+  storage_state_path: .auth/user.json
+  notes: []                                # runner / probe diagnostics
   status: steps_ready
 ```
 
@@ -61,13 +74,26 @@ A node walks one direction through these statuses, never backwards
 (except via `--force`):
 
 ```
-pending → extracted → pom_ready → feature_ready → steps_ready → complete
-                                                                 │
-                                                                 └─▶ failed (any stage)
+pending → extracted → pom_ready → feature_ready → steps_ready
+                                                     │
+                                  ┌──────────────────┼─────────────────────┐
+                                  ▼                  ▼                     ▼
+                               complete    needs_implementation           failed
 ```
 
 The orchestrator advances the status **after** writing each artifact,
 so a crash mid-write leaves the prior status intact.
+
+- **`complete`** — all artifacts rendered and the step file has zero
+  `NotImplementedError` placeholders.
+- **`needs_implementation`** — all artifacts rendered, but the step
+  file still has ≥ 1 placeholder that synthesis could not cover. The
+  end-of-run summary becomes `run_done_with_issues` so this does not
+  get missed. Re-running the URL (or `autocoder heal`) picks up the
+  work; `skip_regen` intentionally requires `status == complete` to
+  short-circuit, so `needs_implementation` URLs always regenerate.
+- **`failed`** — any stage raised. Logged with `err_type` so the rest
+  of the run continues.
 
 ## Resume
 

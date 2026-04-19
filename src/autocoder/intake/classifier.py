@@ -23,6 +23,7 @@ from playwright.sync_api import Page, TimeoutError as PWTimeout, sync_playwright
 
 from autocoder import logger
 from autocoder.config import Settings
+from autocoder.extract.browser import AuthUnreachable, goto_resilient
 from autocoder.models import URLKind, URLNode
 from autocoder.utils import url_slug
 
@@ -41,9 +42,20 @@ _LOGIN_INPUT_NAME_HINTS = ("email", "user", "username", "login", "account")
 _LOGIN_PASSWORD_TYPE = 'input[type="password"]'
 
 
-def _looks_like_login_url(url: str) -> bool:
+def looks_like_login_url(url: str) -> bool:
+    """Public URL-path heuristic.
+
+    Exposed so the orchestrator can make auth-first decisions when
+    classification could not reach the page (timeouts, SSO redirects).
+    """
+    if not url:
+        return False
     p = urlparse(url).path.lower()
     return any(hint in p for hint in _LOGIN_URL_HINTS)
+
+
+# Back-compat alias so older imports keep working.
+_looks_like_login_url = looks_like_login_url
 
 
 def _looks_like_login_page(page: Page) -> bool:
@@ -101,19 +113,36 @@ def classify_urls(
                 slug = f"{slug}_{seen_slugs[slug]}"
 
             node = URLNode(url=raw_url, slug=slug)
+
+            # Pre-mark LOGIN from URL path so the signal survives any
+            # navigation failure. A real form check below can only
+            # upgrade, never downgrade, this early guess.
+            url_is_login_shaped = looks_like_login_url(raw_url)
+            if url_is_login_shaped:
+                node.kind = URLKind.LOGIN
+                detected_login_url = detected_login_url or raw_url
+                node.notes.append("login_inferred_from_path")
+
             try:
-                resp = page.goto(raw_url, wait_until="domcontentloaded", timeout=nav_timeout)
-                final_url = page.url
+                diag = goto_resilient(
+                    page,
+                    raw_url,
+                    nav_timeout_ms=nav_timeout,
+                    diagnostics_dir=settings.paths.logs_dir,
+                )
+                final_url = diag.final_url or page.url
                 node.redirects_to = final_url if final_url != raw_url else None
+                status = diag.status
 
                 redirected_to_login = (
-                    node.redirects_to is not None and _looks_like_login_url(final_url)
+                    node.redirects_to is not None and looks_like_login_url(final_url)
                 )
                 page_is_login = _looks_like_login_page(page)
 
                 reason = ""
-                if page_is_login and (raw_url == final_url or _looks_like_login_url(raw_url)):
+                if page_is_login and (raw_url == final_url or looks_like_login_url(raw_url)):
                     node.kind = URLKind.LOGIN
+                    detected_login_url = detected_login_url or final_url
                     reason = "password_field_present_at_target"
                 elif redirected_to_login:
                     node.kind = URLKind.REDIRECT_TO_LOGIN
@@ -124,16 +153,21 @@ def classify_urls(
                     node.kind = URLKind.LOGIN
                     detected_login_url = detected_login_url or final_url
                     reason = "password_field_present_post_redirect"
+                elif url_is_login_shaped:
+                    # URL path *said* it is a login page even though we
+                    # could not find a password field — keep the hint.
+                    node.kind = URLKind.LOGIN
+                    reason = "login_path_hint_preserved"
                 else:
                     node.kind = URLKind.PUBLIC
                     reason = "no_password_field_no_login_redirect"
 
-                if resp is not None and resp.status >= 400:
-                    node.notes.append(f"http_status={resp.status}")
+                if status is not None and status >= 400:
+                    node.notes.append(f"http_status={status}")
                     logger.warn(
                         "classify_http_error",
                         url=logger.safe_url(raw_url),
-                        status=resp.status,
+                        status=status,
                     )
                 logger.info(
                     "classify",
@@ -143,11 +177,59 @@ def classify_urls(
                     kind=node.kind.value,
                     requires_auth=node.requires_auth,
                     reason=reason,
-                    http=(resp.status if resp is not None else 0),
+                    wait_strategy=diag.wait_strategy,
+                    http=(status if status is not None else 0),
                 )
+            except AuthUnreachable as exc:
+                # Navigation itself timed out. Decide from path hints
+                # and explicit LOGIN_URL config rather than silently
+                # dropping the URL into UNKNOWN.
+                node.notes.append(f"nav_timeout: {exc!s}")
+                if url_is_login_shaped:
+                    node.kind = URLKind.LOGIN
+                    detected_login_url = detected_login_url or raw_url
+                    logger.warn(
+                        "classify_timeout_login_inferred",
+                        slug=slug,
+                        url=logger.safe_url(raw_url),
+                        nav_timeout_ms=nav_timeout,
+                        **exc.diag.to_dict(),
+                    )
+                elif settings.login_url:
+                    # An auth-protected URL that cannot even commit,
+                    # while the user has declared a login endpoint.
+                    # Mark it as needing auth so auth-first can fire.
+                    node.kind = URLKind.UNKNOWN
+                    node.requires_auth = True
+                    node.notes.append("unreachable_marking_requires_auth")
+                    logger.warn(
+                        "classify_timeout_escalated_to_auth",
+                        slug=slug,
+                        url=logger.safe_url(raw_url),
+                        login_url=logger.safe_url(settings.login_url),
+                        **exc.diag.to_dict(),
+                    )
+                else:
+                    node.kind = URLKind.UNKNOWN
+                    logger.warn(
+                        "classify_timeout",
+                        slug=slug,
+                        url=logger.safe_url(raw_url),
+                        nav_timeout_ms=nav_timeout,
+                        **exc.diag.to_dict(),
+                    )
             except PWTimeout as exc:
-                node.kind = URLKind.UNKNOWN
+                # Defensive: goto_resilient normalises to AuthUnreachable,
+                # but downstream waits could still surface the raw error.
                 node.notes.append(f"timeout: {exc!s}")
+                if url_is_login_shaped:
+                    node.kind = URLKind.LOGIN
+                    detected_login_url = detected_login_url or raw_url
+                else:
+                    node.kind = URLKind.UNKNOWN
+                    if settings.login_url:
+                        node.requires_auth = True
+                        node.notes.append("unreachable_marking_requires_auth")
                 logger.warn(
                     "classify_timeout",
                     slug=slug,
@@ -155,8 +237,12 @@ def classify_urls(
                     nav_timeout_ms=nav_timeout,
                 )
             except Exception as exc:  # noqa: BLE001
-                node.kind = URLKind.UNKNOWN
                 node.notes.append(f"error: {exc!s}")
+                if url_is_login_shaped:
+                    node.kind = URLKind.LOGIN
+                    detected_login_url = detected_login_url or raw_url
+                else:
+                    node.kind = URLKind.UNKNOWN
                 logger.warn("classify_error", slug=slug, url=logger.safe_url(raw_url), err=str(exc))
 
             nodes.append(node)

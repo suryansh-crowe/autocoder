@@ -14,6 +14,7 @@ Notes:
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -22,6 +23,104 @@ import httpx
 
 from autocoder import logger
 from autocoder.config import OllamaSettings
+
+
+_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+
+
+def _try_parse_json(text: str) -> Any | None:
+    """Best-effort JSON recovery — returns ``None`` if all attempts fail.
+
+    Recovery ladder (cheapest → most aggressive):
+
+    1. Direct ``json.loads`` on the stripped text.
+    2. Strip markdown fences (``` or ```json) and retry.
+    3. Slice the outermost balanced ``{ ... }`` — handles prose
+       around the object and respects strings / escapes so we do not
+       mis-count braces inside quoted values.
+    4. If the payload has an odd number of unescaped quotes, tentatively
+       close the open string and any outstanding braces.
+    """
+    if not text:
+        return None
+    stripped = text.strip()
+
+    # 1. direct
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. fences
+    defenced = _FENCE_RE.sub("", stripped).strip()
+    if defenced and defenced != stripped:
+        try:
+            return json.loads(defenced)
+        except json.JSONDecodeError:
+            pass
+
+    candidate = defenced or stripped
+
+    # 3. outermost balanced object
+    start = candidate.find("{")
+    if start != -1:
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(candidate)):
+            ch = candidate[i]
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(candidate[start : i + 1])
+                    except json.JSONDecodeError:
+                        break
+
+    # 4. unterminated string / missing closers
+    slice_start = start if start != -1 else 0
+    fragment = candidate[slice_start:]
+    # count unescaped quotes
+    quotes = 0
+    esc = False
+    for ch in fragment:
+        if esc:
+            esc = False
+            continue
+        if ch == "\\":
+            esc = True
+            continue
+        if ch == '"':
+            quotes += 1
+    patched = fragment
+    if quotes % 2 == 1:
+        patched = patched + '"'
+    # close any outstanding braces/brackets naively
+    opens = patched.count("{") - patched.count("}")
+    if opens > 0:
+        patched = patched + ("}" * opens)
+    opens_sq = patched.count("[") - patched.count("]")
+    if opens_sq > 0:
+        patched = patched + ("]" * opens_sq)
+    if patched != fragment:
+        try:
+            return json.loads(patched)
+        except json.JSONDecodeError:
+            return None
+    return None
 
 
 @dataclass
@@ -148,37 +247,75 @@ class OllamaClient:
         user: str,
         max_tokens: int | None = None,
         purpose: str = "unspecified",
+        retries: int = 1,
     ) -> dict[str, Any]:
-        """Wrapper that parses the response into a dict and validates JSON."""
-        resp = self.chat(
-            system=system,
-            user=user,
-            json_mode=True,
-            max_tokens=max_tokens,
-            purpose=purpose,
-        )
-        try:
-            return json.loads(resp.text)
-        except json.JSONDecodeError as exc:
-            # Last-ditch: try to slice off prose around the JSON.
-            text = resp.text.strip()
-            first = text.find("{")
-            last = text.rfind("}")
-            if first != -1 and last != -1 and last > first:
-                try:
-                    parsed = json.loads(text[first : last + 1])
+        """Return a parsed JSON object, retrying once with a stricter prompt.
+
+        Parsing runs through :func:`_try_parse_json`, which tolerates
+        markdown fences, prose around the object, and common truncation
+        bugs (unterminated strings, missing closing braces). Only when
+        all recovery attempts fail do we raise :class:`OllamaError`.
+        """
+        attempts: list[str] = []
+        last_err: Exception | None = None
+        for attempt in range(retries + 1):
+            sys_prompt = system
+            if attempt > 0:
+                sys_prompt = (
+                    system
+                    + "\n\nSTRICT OUTPUT REQUIREMENTS:\n"
+                      "- Respond with exactly ONE JSON object and nothing else.\n"
+                      "- Do not wrap the response in markdown or prose.\n"
+                      "- Close every string and every brace.\n"
+                      "- Keep total output short enough to complete."
+                )
+            try:
+                resp = self.chat(
+                    system=sys_prompt,
+                    user=user,
+                    json_mode=True,
+                    max_tokens=max_tokens,
+                    purpose=purpose,
+                )
+            except OllamaError as exc:
+                last_err = exc
+                logger.warn(
+                    "ollama_json_retry_http",
+                    purpose=purpose,
+                    attempt=attempt,
+                    err=str(exc),
+                )
+                continue
+
+            parsed = _try_parse_json(resp.text)
+            if parsed is not None:
+                if attempt > 0:
                     logger.warn(
                         "ollama_json_recovered",
                         purpose=purpose,
-                        head=text[:60].replace("\n", " "),
+                        attempt=attempt,
+                        head=resp.text[:80].replace("\n", " "),
                     )
-                    return parsed
-                except json.JSONDecodeError:
-                    pass
-            logger.error(
-                "ollama_json_parse_failed",
+                return parsed
+
+            head = resp.text[:120].replace("\n", " ")
+            attempts.append(head)
+            logger.warn(
+                "ollama_json_retry",
                 purpose=purpose,
-                err=str(exc),
-                head=text[:120].replace("\n", " "),
+                attempt=attempt,
+                head=head,
             )
-            raise OllamaError(f"Could not parse JSON from model output: {exc!s}\n---\n{text[:400]}") from exc
+            last_err = OllamaError(f"unparseable JSON: head={head!r}")
+
+        logger.error(
+            "ollama_json_parse_failed",
+            purpose=purpose,
+            attempts=len(attempts),
+            err=str(last_err) if last_err else "unknown",
+            head=(attempts[-1] if attempts else ""),
+        )
+        raise OllamaError(
+            f"Could not parse JSON from model output after {retries + 1} attempts: "
+            f"{last_err!s}"
+        )

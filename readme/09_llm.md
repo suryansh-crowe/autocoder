@@ -219,6 +219,36 @@ Ollama. It is intentionally thin:
   not a token stream.
 - Logs are emitted with input/output token counts and wall time.
 
+### JSON recovery ladder
+
+Phi-4 at Q4_K_M occasionally returns JSON with one of: markdown
+fences, a preamble sentence, an unterminated string near
+`num_predict`, or a missing closing brace. `_try_parse_json` walks
+a cheap-to-expensive ladder before giving up:
+
+1. `json.loads(text.strip())`.
+2. Strip markdown fences (` ```json … ``` `) and retry.
+3. Slice the outermost balanced `{ … }` — scanning character by
+   character and respecting quoted strings + escapes — then retry.
+4. If the payload has an odd number of unescaped quotes or missing
+   closing braces, append `"` / `}` / `]` as needed and retry.
+
+If every step fails, `chat_json` fires **one retry** with the system
+prompt extended by:
+
+```
+STRICT OUTPUT REQUIREMENTS:
+- Respond with exactly ONE JSON object and nothing else.
+- Do not wrap the response in markdown or prose.
+- Close every string and every brace.
+- Keep total output short enough to complete.
+```
+
+Only after the retry also fails (or the recovery ladder fails on the
+retry response) does the client raise `OllamaError`. Events:
+`ollama_json_retry attempt=0`, `ollama_json_recovered attempt=1` on
+success, `ollama_json_parse_failed` on total failure.
+
 ## Prompts
 
 There are four prompt families across the codebase. All return a
@@ -317,13 +347,40 @@ Output is typically ~180 tokens.
 - Drops duplicate method names.
 - Rejects unknown action verbs.
 - Auto-fills `args=["value"]` for `fill` / `select` if missing.
-- Drops scenario steps whose `pom_method` is not in the POM plan
-  (the step still survives, but its body becomes
-  `raise NotImplementedError(...)` so a human can see exactly which
-  assertions still need authoring).
+- For scenario steps whose `pom_method` is not in the POM plan,
+  tries a **close-match rebind** via `difflib.get_close_matches`
+  (cutoff `0.75`). If a single close name exists, the step binds to
+  that method and the validator logs
+  `rebinding pom_method 'check_terms_of_service' -> 'check_terms_of_service_checkbox' (close match)`.
+  If no close match exists, the binding is nulled and the validator
+  logs the three nearest valid names so you can see what the model
+  almost said.
 - Dedupes scenarios by title.
 
+A nulled `pom_method` still lets the renderer attempt synthesis
+(navigation / assertion / negation patterns — see `10_generation.md`)
+before falling back to `NotImplementedError`.
+
 Anything dropped is logged at WARN with the reason. No silent fixes.
+
+## Plan-level fallback
+
+If `chat_json` ultimately raises `OllamaError` for the *feature plan*
+call, `generate_feature_plan` does **not** abort the URL. It logs
+`feature_plan_fallback` and returns a minimal `FeaturePlan` that
+still references the POM class, so:
+
+- The POM file still renders (the user does not lose a working POM to
+  a bad LLM response).
+- `tests/features/<slug>.feature` renders with one placeholder smoke
+  scenario and a clear fallback description.
+- The URL ends up as `needs_implementation` via the quality gate, not
+  `failed`, so `autocoder generate --force` / `autocoder heal` can
+  pick up the work once the LLM is healthy.
+
+The POM plan does not have the same fallback — a broken POM plan
+genuinely fails the URL, because everything downstream depends on
+knowing which methods exist.
 
 ## Plan cache
 
@@ -342,8 +399,10 @@ cache.
 
 | Failure                               | Detection                                  | Recovery |
 |---------------------------------------|--------------------------------------------|----------|
-| Model returns invalid JSON            | `json.loads` raises in `chat_json`         | Client retries the slice between the first `{` and last `}`. |
-| Model invents an element id           | Validator drops the method                 | The remaining methods still render. |
-| Model invents a POM method            | Validator nulls out `pom_method` on step   | The step renders as `NotImplementedError` so it cannot silently pass. |
-| Ollama unreachable                    | `is_available()` check fails before stage 4| Orchestrator exits with the endpoint and a fix hint. |
-| Generation timeout (CPU stalled)      | `httpx` read timeout (default 600 s)       | Run is reported failed; rerun resumes from the same URL. |
+| Model returns invalid JSON            | `_try_parse_json` walks the recovery ladder | Fence strip → balanced-brace slice → unterminated-string repair. Failing that, one `chat_json` retry with a stricter system prompt. Only then `OllamaError`. |
+| `OllamaError` on feature plan         | Raised after retry                          | `generate_feature_plan` logs `feature_plan_fallback` and returns a minimal `FeaturePlan` so the POM + steps still render; the URL ends up `needs_implementation`. |
+| `OllamaError` on POM plan             | Raised after retry                          | The URL is marked `failed`; nothing downstream depends on a broken POM plan. |
+| Model invents an element id           | Validator drops the method                  | The remaining methods still render. |
+| Model invents a POM method            | Validator close-match rebinds via difflib   | If no close match, the binding is nulled and the renderer tries synthesis; ultimate fallback is `NotImplementedError`. |
+| Ollama unreachable                    | `is_available()` check fails before stage 4 | Orchestrator exits with the endpoint and a fix hint. |
+| Generation timeout (CPU stalled)      | `httpx` read timeout (default 600 s)        | Run is reported failed; rerun resumes from the same URL. |

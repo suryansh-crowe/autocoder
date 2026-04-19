@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 
 from autocoder import logger
-from autocoder.llm.ollama_client import OllamaClient
+from autocoder.llm.ollama_client import OllamaClient, OllamaError
 from autocoder.llm.prompts import (
     FEATURE_SYSTEM,
     POM_SYSTEM,
@@ -33,6 +33,38 @@ from autocoder.models import (
     StepRef,
     POMMethod,
 )
+
+
+def _fallback_feature_plan(pom_plan: POMPlan, err: str) -> FeaturePlan:
+    """Minimal feature plan used when the LLM cannot produce valid JSON.
+
+    The goal is to keep the rest of the pipeline alive: the POM and
+    step bindings still render, and the ``.feature`` file carries a
+    single placeholder scenario plus a machine-readable comment the
+    user can grep for when auditing a run.
+    """
+    title = pom_plan.class_name or pom_plan.fixture_name or "page"
+    description = (
+        f"Auto-fallback feature (LLM JSON failure: {err[:120]}). "
+        "Regenerate with `autocoder generate --force` once the LLM is healthy."
+    )
+    scenario = ScenarioPlan(
+        title=f"smoke: render {title}",
+        tier="smoke",
+        steps=[
+            StepRef(
+                keyword="Given",
+                text=f"I open the {title} page",
+                pom_method=None,
+            )
+        ],
+    )
+    return FeaturePlan(
+        feature=title,
+        description=description,
+        background=[],
+        scenarios=[scenario],
+    )
 
 
 def _read_cache(path: Path) -> dict | None:
@@ -156,11 +188,24 @@ def generate_feature_plan(
         pom_method_names=method_names,
         requested_tiers=requested_tiers,
     )
-    raw = client.chat_json(
-        system=FEATURE_SYSTEM,
-        user=user,
-        purpose=f"feature_plan:{pom_plan.fixture_name}",
-    )
+    try:
+        raw = client.chat_json(
+            system=FEATURE_SYSTEM,
+            user=user,
+            purpose=f"feature_plan:{pom_plan.fixture_name}",
+        )
+    except OllamaError as exc:
+        # Do not let a bad JSON response wipe out the POM artifacts.
+        # Emit a placeholder feature so steps still render, and leave a
+        # cache marker so a future rerun with a healthier LLM will
+        # replace it.
+        logger.warn(
+            "feature_plan_fallback",
+            fixture=pom_plan.fixture_name,
+            err=str(exc),
+            hint="Rerun with --force once the LLM is stable.",
+        )
+        return _fallback_feature_plan(pom_plan, str(exc))
     cleaned, issues = validate_feature_plan(raw, method_names)
     if issues:
         logger.warn(

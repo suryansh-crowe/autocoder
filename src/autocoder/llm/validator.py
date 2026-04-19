@@ -13,6 +13,7 @@ typically: drop the offending entry, log a warning, and keep the rest.
 
 from __future__ import annotations
 
+import difflib
 from typing import Any
 
 from autocoder.models import Element
@@ -108,8 +109,26 @@ def validate_feature_plan(
             return None
         method = raw.get("pom_method")
         if method and method not in valid_methods:
-            issues.append(f"unknown pom_method {method!r} -> falling back to manual step")
-            method = None
+            # Close-match rebind before giving up: cheap, deterministic,
+            # and catches common LLM hallucinations like dropping an
+            # underscore or using the element's display name verbatim.
+            candidates = difflib.get_close_matches(
+                method, list(valid_methods), n=1, cutoff=0.75
+            )
+            if candidates:
+                issues.append(
+                    f"rebinding pom_method {method!r} -> {candidates[0]!r} (close match)"
+                )
+                method = candidates[0]
+            else:
+                near = difflib.get_close_matches(
+                    method, list(valid_methods), n=3, cutoff=0.4
+                )
+                issues.append(
+                    f"unknown pom_method {method!r} -> falling back to manual step "
+                    f"(nearest: {near or 'none'})"
+                )
+                method = None
         args = raw.get("args") or []
         if not isinstance(args, list):
             args = []

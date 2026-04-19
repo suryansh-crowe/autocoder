@@ -8,11 +8,20 @@ pages can be explored.
 
 from __future__ import annotations
 
+import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
-from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
+from playwright.sync_api import (
+    Browser,
+    BrowserContext,
+    Page,
+    Playwright,
+    TimeoutError as PWTimeout,
+    sync_playwright,
+)
 
 from autocoder import logger
 from autocoder.config import Settings
@@ -24,6 +33,45 @@ class BrowserSession:
     browser: Browser
     context: BrowserContext
     page: Page
+
+
+@dataclass
+class NavDiagnostics:
+    """Everything we captured during a resilient navigation attempt."""
+
+    final_url: str = ""
+    status: int | None = None
+    redirects: list[str] = field(default_factory=list)
+    popup_urls: list[str] = field(default_factory=list)
+    console_errors: list[str] = field(default_factory=list)
+    failed_requests: list[str] = field(default_factory=list)
+    wait_strategy: str = ""
+    elapsed_s: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "final_url": logger.safe_url(self.final_url),
+            "status": self.status,
+            "redirects": [logger.safe_url(u) for u in self.redirects[:8]],
+            "popup_urls": [logger.safe_url(u) for u in self.popup_urls[:3]],
+            "console_errors": self.console_errors[:5],
+            "failed_requests": self.failed_requests[:5],
+            "wait_strategy": self.wait_strategy,
+            "elapsed": f"{self.elapsed_s:.2f}s",
+        }
+
+
+class AuthUnreachable(RuntimeError):
+    """Raised when a resilient goto times out with no usable DOM.
+
+    Carries the :class:`NavDiagnostics` captured during the attempt so
+    callers can decide whether to escalate into the auth-first flow.
+    """
+
+    def __init__(self, url: str, diag: NavDiagnostics):
+        super().__init__(f"navigation timed out for {url}")
+        self.url = url
+        self.diag = diag
 
 
 @contextmanager
@@ -75,3 +123,112 @@ def open_session(
 
 def ensure_storage_state_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def goto_resilient(
+    page: Page,
+    url: str,
+    *,
+    nav_timeout_ms: int,
+    diagnostics_dir: Path | None = None,
+    capture_on_timeout: bool = True,
+) -> NavDiagnostics:
+    """Navigate with a tiered wait strategy and capture diagnostics.
+
+    Why: ``wait_until="domcontentloaded"`` is fragile for SPAs that
+    immediately redirect to a different origin (SSO, auth middleware).
+    We try ``commit`` first (fires as soon as the first response byte
+    is received), then *best-effort* escalate to ``domcontentloaded``
+    and ``networkidle`` within bounded budgets. If even ``commit``
+    cannot complete we raise :class:`AuthUnreachable` with a diagnostic
+    payload so the orchestrator can decide whether to run auth-first.
+    """
+    diag = NavDiagnostics()
+    started = time.monotonic()
+
+    def _on_console(msg) -> None:
+        try:
+            if msg.type in {"error", "warning"}:
+                diag.console_errors.append(f"{msg.type}:{msg.text[:160]}")
+        except Exception:
+            pass
+
+    def _on_request_failed(req) -> None:
+        try:
+            diag.failed_requests.append(
+                f"{req.method} {logger.safe_url(req.url)} {req.failure or ''}".strip()
+            )
+        except Exception:
+            pass
+
+    def _on_frame_nav(frame) -> None:
+        try:
+            if frame == page.main_frame:
+                diag.redirects.append(frame.url)
+        except Exception:
+            pass
+
+    def _on_popup(popup) -> None:
+        try:
+            diag.popup_urls.append(popup.url or "")
+        except Exception:
+            pass
+
+    page.on("console", _on_console)
+    page.on("requestfailed", _on_request_failed)
+    page.on("framenavigated", _on_frame_nav)
+    page.on("popup", _on_popup)
+
+    # Tier 1: commit — as soon as the first response byte arrives.
+    try:
+        resp = page.goto(url, wait_until="commit", timeout=nav_timeout_ms)
+        diag.wait_strategy = "commit"
+        diag.status = getattr(resp, "status", None) if resp is not None else None
+    except PWTimeout:
+        # If commit itself cannot land, there is no usable DOM.
+        diag.final_url = page.url or url
+        diag.elapsed_s = time.monotonic() - started
+        if capture_on_timeout and diagnostics_dir is not None:
+            _dump_timeout_artifacts(page, url, diagnostics_dir)
+        raise AuthUnreachable(url, diag) from None
+
+    # Tier 2: best-effort domcontentloaded.
+    try:
+        page.wait_for_load_state(
+            "domcontentloaded", timeout=max(nav_timeout_ms // 2, 5_000)
+        )
+        diag.wait_strategy = "commit+domcontentloaded"
+    except PWTimeout:
+        pass
+
+    # Tier 3: best-effort networkidle (short budget — SPAs rarely settle).
+    try:
+        page.wait_for_load_state("networkidle", timeout=5_000)
+        diag.wait_strategy = diag.wait_strategy + "+networkidle"
+    except PWTimeout:
+        pass
+
+    diag.final_url = page.url
+    diag.elapsed_s = time.monotonic() - started
+    return diag
+
+
+def _dump_timeout_artifacts(page: Page, url: str, out_dir: Path) -> None:
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        safe_host = logger.safe_url(url).split("//")[-1].split("/")[0] or "page"
+        base = out_dir / f"nav_timeout_{stamp}_{safe_host}"
+        try:
+            page.screenshot(path=str(base) + ".png", full_page=True)
+        except Exception:
+            pass
+        try:
+            (Path(str(base) + ".html")).write_text(
+                page.content() or "", encoding="utf-8"
+            )
+        except Exception:
+            pass
+        logger.warn("nav_timeout_artifacts", base=str(base))
+    except Exception:
+        pass

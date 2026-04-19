@@ -39,6 +39,7 @@ class Status(str, Enum):
     FEATURE_READY = "feature_ready"
     STEPS_READY = "steps_ready"
     COMPLETE = "complete"
+    NEEDS_IMPLEMENTATION = "needs_implementation"
     FAILED = "failed"
 
 
@@ -152,15 +153,62 @@ class AuthSpec(BaseModel):
     username_env: str = "LOGIN_USERNAME"
     password_env: str = "LOGIN_PASSWORD"
     otp_secret_env: str | None = "LOGIN_OTP_SECRET"
+    # ``auth_kind`` tells the runner which flow to execute. The set is
+    # open-ended so detection can evolve without schema churn.
+    #
+    # * ``form``            — username + password inputs inline
+    #                         (classic single-step flow).
+    # * ``username_first``  — identifier-first: the page shows only a
+    #                         username/email and a Next/Continue button.
+    #                         The password field (or an IdP) appears
+    #                         after clicking Next.
+    # * ``email_only``      — magic-link style where the only input is
+    #                         an email; submission causes a link/code
+    #                         to be sent (completion is external).
+    # * ``magic_link``      — explicit "Email me a login link" flow.
+    #                         Requires the user to open their inbox.
+    # * ``otp_code``        — "Send me a code" flow; code entry may be
+    #                         on a second page or via the same email.
+    # * ``sso_microsoft``   — provider button that redirects to
+    #                         ``login.microsoftonline.com``.
+    # * ``sso_generic``     — any other provider button; runner clicks
+    #                         and then looks for a standard form at the
+    #                         destination.
+    # * ``unknown_auth``    — login page shape was not recognised; we
+    #                         still emit a best-effort scaffold.
+    auth_kind: Literal[
+        "form",
+        "username_first",
+        "email_only",
+        "magic_link",
+        "otp_code",
+        "sso_microsoft",
+        "sso_generic",
+        "unknown_auth",
+    ] = "form"
     username_selector: StableSelector | None = None
     password_selector: StableSelector | None = None
     submit_selector: StableSelector | None = None
+    # Second-step "Next"/"Continue"/"Send link"/"Send code" button.
+    # Used by multi-step flows (``username_first``, ``email_only``,
+    # ``magic_link``, ``otp_code``) to advance past the first screen.
+    continue_selector: StableSelector | None = None
+    # Selector for the provider button on the app's own login page
+    # (only used when ``auth_kind`` starts with ``sso_``).
+    sso_button_selector: StableSelector | None = None
+    # ``True`` when the flow cannot be completed end-to-end by the
+    # orchestrator (magic link in an email, hardware-MFA prompt, etc.).
+    # The rest of the pipeline still renders the best scaffold it can
+    # and surfaces this flag in the run summary.
+    requires_external_completion: bool = False
     success_indicator_url_contains: str | None = None
     success_indicator_text: str | None = None
     setup_path: str | None = None
     storage_state_path: str | None = None
     last_run_at: str | None = None
     status: Status = Status.PENDING
+    # Free-text diagnostics from probe/runner. Shown in run summary.
+    notes: list[str] = Field(default_factory=list)
 
 
 class Registry(BaseModel):

@@ -9,11 +9,22 @@ Steps are emitted *deterministically* from the FeaturePlan + POMPlan:
   two functions sharing a Python name.
 * If the step references a POM method, the body calls
   ``page_object.<method>(*args)`` — and only when the step actually
-  supplies values for every parameter the POM method requires. When
-  args are missing, the body raises ``NotImplementedError`` so the
-  failing step is loud, not silently broken.
-* If the step does not reference a POM method at all, the body
-  raises ``NotImplementedError("Implement step: ...")``.
+  supplies values for every parameter the POM method requires.
+* If the step does not reference a POM method, we attempt to
+  **synthesize** executable Playwright code from the step text:
+
+  * "the user is on the <X> page" → ``page_object.navigate()``
+  * "the <X> is visible" / "is displayed" → ``expect(locator).to_be_visible()``
+  * "the <X> checkbox is not checked" → ``expect(locator).not_to_be_checked()``
+  * "the <X> checkbox is checked" → ``expect(locator).to_be_checked()``
+  * "the user clicks the <X>" → ``page_object.<fuzzy-match>()`` if one exists.
+
+  Synthesis uses the ``Element`` catalog the POM was built from so the
+  generated calls reference the *same* selector keys the runtime
+  resolver knows how to self-heal.
+
+* Only when synthesis fails do we emit ``NotImplementedError`` — and
+  the orchestrator counts those occurrences as a quality-gate signal.
 """
 
 from __future__ import annotations
@@ -21,7 +32,7 @@ from __future__ import annotations
 import re
 from collections import OrderedDict
 
-from autocoder.models import FeaturePlan, POMPlan, StepRef
+from autocoder.models import Element, FeaturePlan, POMPlan, StepRef
 
 
 _HEADER = '''"""Generated step definitions for {feature_title!r}."""
@@ -115,18 +126,179 @@ def _resolve_keywords(steps: list[StepRef]) -> list[StepRef]:
     return out
 
 
+# Words that add no information when matching step text to elements /
+# POM methods. Keep this list focused on *noise*, not on content.
+#
+# IMPORTANT: negation words ("not", "without", "never", "doesn't", "does")
+# and anchors like "checked"/"disabled" are NOT in this set — they carry
+# meaning that the assertion/negation branches below need to read.
+_STOPWORDS = {
+    "the", "a", "an", "user", "users", "is", "are", "on", "in", "of", "to",
+    "page", "screen", "view", "with", "and", "or",
+    "taps", "tap", "presses", "press", "selects", "enters",
+    "enter", "types", "type", "into", "onto",
+    "at", "from", "for", "that", "this", "sees", "see", "seen",
+}
+
+_NEGATION_RE = re.compile(
+    r"\b(does\s+not|doesn'?t|do\s+not|don'?t|did\s+not|didn'?t|"
+    r"will\s+not|won'?t|cannot|can'?t|should\s+not|shouldn'?t|"
+    r"must\s+not|mustn'?t|without|never|no\s+longer)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize(text: str) -> list[str]:
+    """Lowercase + tokenize step text, dropping common filler words."""
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    return [w for w in words if w and w not in _STOPWORDS and len(w) > 1]
+
+
+def _best_element_match(tokens: list[str], elements: list[Element]) -> Element | None:
+    """Heuristic: score each element by token overlap with step text."""
+    if not tokens or not elements:
+        return None
+
+    def _score(e: Element) -> int:
+        pool = " ".join(
+            str(x)
+            for x in (e.id, e.name or "", e.role or "", e.kind or "")
+        ).lower()
+        hit = 0
+        for t in tokens:
+            if t in pool:
+                hit += 1
+        return hit
+
+    ranked = sorted(elements, key=_score, reverse=True)
+    top = ranked[0]
+    if _score(top) == 0:
+        return None
+    return top
+
+
+def _best_method_match(tokens: list[str], methods: list[str]) -> str | None:
+    """Pick a POM method name whose tokens best cover the step tokens."""
+    if not tokens or not methods:
+        return None
+
+    def _score(name: str) -> int:
+        parts = name.lower().split("_")
+        return sum(1 for t in tokens if t in parts)
+
+    ranked = sorted(methods, key=_score, reverse=True)
+    top = ranked[0]
+    if _score(top) < 2:  # demand at least two shared tokens
+        return None
+    return top
+
+
+# Each entry: (regex pattern, format template). Template can reference
+# ``{locator}`` for a ``page_object.locate(...)`` call against the
+# matched element, or ``{fixture}`` / ``{method}`` for fuzzy method
+# matches. The first matching entry wins.
+#
+# The "state" prefix accepts the three ways users phrase an expected
+# state: ``is``, ``should be``, ``must be``. "becomes"/"gets" also
+# appear in some QA dialects.
+_STATE = r"(?:is|should\s+be|must\s+be|becomes|gets)"
+
+_ASSERTION_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(rf"\b{_STATE}\s+not\s+checked\b|\bis\s+unchecked\b", re.IGNORECASE),
+     "expect({locator}).not_to_be_checked()"),
+    (re.compile(rf"\b{_STATE}\s+checked\b", re.IGNORECASE),
+     "expect({locator}).to_be_checked()"),
+    (re.compile(rf"\b{_STATE}\s+not\s+visible\b|\b{_STATE}\s+hidden\b", re.IGNORECASE),
+     "expect({locator}).not_to_be_visible()"),
+    (re.compile(rf"\b{_STATE}\s+(visible|displayed|shown|present)\b", re.IGNORECASE),
+     "expect({locator}).to_be_visible()"),
+    (re.compile(rf"\b{_STATE}\s+not\s+enabled\b|\b{_STATE}\s+disabled\b", re.IGNORECASE),
+     "expect({locator}).to_be_disabled()"),
+    (re.compile(rf"\b{_STATE}\s+enabled\b", re.IGNORECASE),
+     "expect({locator}).to_be_enabled()"),
+)
+
+# Covers both "page" suffix and common synonyms users write in step
+# text: homepage, dashboard, landing, home, site, app.
+_NAV_PATTERN = re.compile(
+    r"\bis\s+on\s+(?:the\s+)?.+\b(page|homepage|home\s*page|landing|dashboard|home|site|app)\b"
+    r"|\bopens?\s+(?:the\s+)?.+\b(page|homepage|home\s*page|landing|dashboard|home|site|app)\b"
+    r"|\bnavigates?\s+to\s+(?:the\s+)?.+\b(page|homepage|home\s*page|landing|dashboard|home|site|app)\b"
+    r"|\bvisits?\s+(?:the\s+)?.+\b(page|homepage|home\s*page|landing|dashboard|home|site|app)\b",
+    re.IGNORECASE,
+)
+
+
+def _try_synthesize(
+    step: StepRef,
+    fixture_name: str,
+    elements: list[Element],
+    pom_method_names: list[str],
+) -> str | None:
+    """Return a runnable Python body, or ``None`` if we cannot synthesize.
+
+    The caller treats ``None`` as "fall through to NotImplementedError".
+    """
+    text = step.text or ""
+    tokens = _normalize(text)
+    is_negated = bool(_NEGATION_RE.search(text))
+
+    # 1. Navigation — "user is on the <X> page" → navigate() on the POM.
+    if _NAV_PATTERN.search(text):
+        return f"{fixture_name}.navigate()"
+
+    # 2. Direct fuzzy method match — "the user clicks the terms of service checkbox"
+    #    → click_terms_of_service_checkbox() if such a method exists.
+    #    BUT: if the step is negated ("user does NOT check ..."), calling
+    #    the affirmative POM method would be the opposite of what the
+    #    scenario asserts. Emit a no-op with an explanatory comment so
+    #    the test runs but does nothing, and the intent is documented.
+    if step.keyword in ("Given", "When", "And", "But") and not is_negated:
+        method = _best_method_match(tokens, pom_method_names)
+        if method:
+            return f"{fixture_name}.{method}()"
+
+    # 3. Assertion patterns.
+    element = _best_element_match(tokens, elements)
+    if element is not None:
+        locator = f"{fixture_name}.locate({element.id!r})"
+        for pattern, tpl in _ASSERTION_PATTERNS:
+            if pattern.search(text):
+                return tpl.format(locator=locator)
+        # Fallback for pure `Then` steps that reference an element but
+        # do not state a specific assertion — default to visibility.
+        # Only for non-negated Then; "Then X is NOT <something>" must
+        # not become "expect visible".
+        if step.keyword == "Then" and not is_negated:
+            return f"expect({locator}).to_be_visible()"
+
+    # 4. Negated action with no better match — a safe no-op preserves
+    #    scenario semantics ("the user does NOT click submit" means
+    #    leave things alone) instead of accidentally executing the
+    #    positive action via fuzzy matching.
+    if is_negated and step.keyword in ("Given", "When", "And", "But"):
+        return (
+            "pass  # intentional no-op: step text asserts a non-action "
+            "(negation detected)"
+        )
+    return None
+
+
 def _body(
     step: StepRef,
     extracted_args: list[str],
     fixture_name: str,
     pom_args_by_method: dict[str, list[str]],
+    elements: list[Element],
 ) -> str:
-    if not step.pom_method:
-        return f'raise NotImplementedError("Implement step: {step.text}")'
-
-    required = pom_args_by_method.get(step.pom_method, [])
-    supplied = list(extracted_args) + list(step.args or [])
-    if len(supplied) < len(required):
+    if step.pom_method:
+        required = pom_args_by_method.get(step.pom_method, [])
+        supplied = list(extracted_args) + list(step.args or [])
+        if len(supplied) >= len(required):
+            return (
+                f"{fixture_name}.{step.pom_method}("
+                f"{', '.join(supplied[: len(required)] or supplied)})"
+            )
         missing = ", ".join(required[len(supplied):])
         return (
             f'raise NotImplementedError('
@@ -134,7 +306,12 @@ def _body(
             f'(POM method {step.pom_method!r} expects: {missing})")'
         )
 
-    return f"{fixture_name}.{step.pom_method}({', '.join(supplied[: len(required)] or supplied)})"
+    synth = _try_synthesize(
+        step, fixture_name, elements, list(pom_args_by_method.keys())
+    )
+    if synth is not None:
+        return synth
+    return f'raise NotImplementedError("Implement step: {step.text}")'
 
 
 def render_steps(
@@ -144,11 +321,19 @@ def render_steps(
     feature_plan: FeaturePlan,
     pom_plan: POMPlan,
     pom_module: str,
+    elements: list[Element] | None = None,
 ) -> str:
-    """Emit a step-definitions module covering every step in the plan."""
+    """Emit a step-definitions module covering every step in the plan.
+
+    ``elements`` is the extraction element catalog. When provided, the
+    renderer can synthesize executable step bodies for common
+    assertion/navigation patterns instead of emitting
+    ``NotImplementedError``.
+    """
     fixture_name = pom_plan.fixture_name
     class_name = pom_plan.class_name
     pom_args_by_method = {m.name: list(m.args or []) for m in pom_plan.methods}
+    el_list: list[Element] = list(elements or [])
 
     parts: list[str] = [
         _HEADER.format(
@@ -189,7 +374,7 @@ def render_steps(
             for kw in keywords
         )
         slug = _slug(text, idx)
-        body = _body(step, extracted_args, fixture_name, pom_args_by_method)
+        body = _body(step, extracted_args, fixture_name, pom_args_by_method, el_list)
         extra_params = "".join(f", {a}: str" for a in extracted_args)
 
         parts.append(
