@@ -179,11 +179,20 @@ def open_shared_session(settings: Settings, *, use_storage_state: bool = False):
             yield BrowserSession(pw=pw, browser=browser, context=context, page=page)
         finally:
             # Persist storage state before teardown so any cookie
-            # refresh the app issued during the run is not lost.
+            # refresh the app issued during the run is not lost. We
+            # also snapshot sessionStorage to a companion file
+            # (MSAL.js keeps its authenticated account there and
+            # Playwright does not persist it by default).
             try:
                 sp.parent.mkdir(parents=True, exist_ok=True)
                 context.storage_state(path=str(sp))
                 logger.debug("shared_storage_saved", path=str(sp))
+            except Exception:
+                pass
+            try:
+                from autocoder.extract.auth_runner import _save_session_storage
+
+                _save_session_storage(page, sp)
             except Exception:
                 pass
             try:

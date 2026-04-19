@@ -196,13 +196,21 @@ def generate(
 @click.option("--force", is_flag=True, help="Ignore caches and rebuild every artifact.")
 @click.option("--skip-llm", is_flag=True, help="Intake + extraction only; do not call the LLM.")
 @click.option(
+    "--verify/--no-verify",
+    default=False,
+    show_default=True,
+    help="When set, run pytest after generation and heal failures up to "
+    "``--max-heal-attempts`` times. Off by default: generation-only is "
+    "the normal flow, and healing happens lazily at pytest time via the "
+    "autoheal plugin (see ``tests/support/autoheal_plugin.py``).",
+)
+@click.option(
     "--max-heal-attempts",
     type=click.IntRange(0, 20),
     default=3,
     show_default=True,
-    help="How many heal passes to run per failing test file before giving up. "
-    "Each pass runs pytest, then `heal --from-pytest` for every failing slug, "
-    "then pytest again. Set 0 to run pytest once and skip healing entirely.",
+    help="Only used with ``--verify``. Upper bound on post-generation heal "
+    "passes per failing test file.",
 )
 def run(
     urls: tuple[str, ...],
@@ -210,26 +218,34 @@ def run(
     tiers: tuple[str, ...],
     force: bool,
     skip_llm: bool,
+    verify: bool,
     max_heal_attempts: int,
 ) -> None:
-    """Full lifecycle: generate -> pytest -> heal -> pytest, on repeat.
+    """Generate POM + features + steps for every URL, with self-healing.
 
-    This is the single command most users should run. It performs the
-    same intake/auth-first/extraction/generation pipeline as
-    ``autocoder generate``, then immediately invokes pytest against
-    the freshly-written tests. Failing tests trigger
-    ``heal --from-pytest`` (which consumes the actual Playwright error
-    messages -- not just ``NotImplementedError`` stubs) and the loop
-    repeats for up to ``--max-heal-attempts`` passes.
+    Default behavior (no ``--verify``)
+    ----------------------------------
+    Runs intake, auth-first (with a shared long-lived browser so MSAL
+    state survives into extraction), per-URL extraction, POM/feature/
+    steps rendering, and stops. **No pytest is invoked.** This is the
+    fast path for iterating on generation itself, and for giving users
+    a ready-to-run suite they execute on their own time.
 
-    A URL ends in one of three states:
+    Heal behavior
+    -------------
+    Heal happens at pytest time, not generation time. The project ships
+    a pytest plugin (``tests/support/autoheal_plugin.py``) that, when
+    enabled, watches for step failures, asks the LLM for a revised
+    body in-process, patches the step file, and retries — "then and
+    there" during the same pytest run. See
+    ``readme/17_heal.md`` for the toggle.
 
-    * ``verified`` -- generation + tests all passing.
-    * ``needs_implementation`` -- generation finished but some tests
-      still fail after the heal budget. Use
-      ``autocoder heal --from-pytest --slug <slug>`` to try again,
-      or hand-edit.
-    * ``failed`` -- generation itself failed; see ``url_failed`` log.
+    Opt-in verify loop (``--verify``)
+    ---------------------------------
+    Keeps the older integrated ``generate -> pytest -> heal -> pytest``
+    cycle available for CI pipelines that want a one-shot "fail the
+    build unless every test passes" check. URLs end in ``verified`` /
+    ``needs_implementation`` / ``failed``.
     """
     settings = load_settings()
     logger.init(settings.paths.logs_dir, level=settings.log_level, command="run")
@@ -239,8 +255,9 @@ def run(
         cmd="run",
         force=force,
         skip_llm=skip_llm,
+        verify=verify,
         tiers=",".join(chosen_tiers),
-        max_heal_attempts=max_heal_attempts,
+        max_heal_attempts=max_heal_attempts if verify else 0,
         log_level=settings.log_level,
         log_file=str(logger.active_log_path() or ""),
     )
@@ -251,19 +268,31 @@ def run(
         force=force,
         skip_llm=skip_llm,
     )
+
+    if not verify:
+        # Generation only. Self-healing is handled lazily by the
+        # pytest autoheal plugin whenever the user runs the suite.
+        results = run_generate(settings, opts)
+        _print_results(results)
+        logger.ok("cli_done", cmd="run", processed=len(results), verify=False)
+        _console.print(
+            "[cyan]Generation complete.[/] Run the suite with: "
+            "[bold]pytest tests/steps[/] "
+            "(set ``AUTOCODER_AUTOHEAL=true`` to heal failing steps live)."
+        )
+        return
+
     outcome = run_full_cycle(settings, opts, max_heal_attempts=max_heal_attempts)
     _print_cycle_outcome(outcome)
-    verified = sum(1 for v in outcome.verification.values() if v.passed)
+    verified_ct = sum(1 for v in outcome.verification.values() if v.passed)
     still_failing = sum(1 for v in outcome.verification.values() if not v.passed)
     logger.ok(
         "cli_done",
         cmd="run",
         processed=len(outcome.generation),
-        verified=verified,
+        verified=verified_ct,
         still_failing=still_failing,
     )
-    # Non-zero exit when any slug is still failing at the end of the
-    # cycle, so CI pipelines reliably catch it.
     if still_failing:
         sys.exit(1)
 

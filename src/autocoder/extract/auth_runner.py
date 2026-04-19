@@ -21,9 +21,11 @@ never logged. We log only whether the value is present (``bool``).
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from playwright.sync_api import Page, TimeoutError as PWTimeout
@@ -32,6 +34,60 @@ from autocoder import logger
 from autocoder.config import Settings
 from autocoder.extract.browser import goto_resilient, open_session
 from autocoder.models import AuthSpec, SelectorStrategy, StableSelector
+
+
+def _session_storage_companion(storage_state_path: Path) -> Path:
+    """Return the path where sessionStorage snapshots live.
+
+    We keep it next to ``storage_state`` so the two always travel
+    together. ``.auth/user.json`` -> ``.auth/user.session_storage.json``.
+    """
+    return storage_state_path.with_name(
+        storage_state_path.stem + ".session_storage" + storage_state_path.suffix
+    )
+
+
+def _save_session_storage(page: Page, storage_state_path: Path) -> None:
+    """Snapshot ``window.sessionStorage`` to a JSON file next to storage_state.
+
+    Playwright's ``context.storage_state()`` persists cookies +
+    ``localStorage`` only. MSAL.js (and most modern SPA auth libs)
+    keeps the authenticated account in ``sessionStorage`` — which is
+    per-tab, per-context. Without snapshotting it here, a fresh
+    browser context (as used by every pytest test) finds no MSAL
+    account on mount and renders the pre-auth consent shell.
+
+    The companion file is JSON of the shape ``{key: value, ...}``.
+    Conftest loads it and replays the entries via ``add_init_script``
+    so every page's first tick sees MSAL's state already populated.
+    """
+    try:
+        raw = page.evaluate(
+            "() => {"
+            "  const out = {};"
+            "  for (let i = 0; i < window.sessionStorage.length; i++) {"
+            "    const k = window.sessionStorage.key(i);"
+            "    out[k] = window.sessionStorage.getItem(k);"
+            "  }"
+            "  return out;"
+            "}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warn("session_storage_capture_failed", err=str(exc))
+        return
+    if not isinstance(raw, dict):
+        return
+    companion = _session_storage_companion(storage_state_path)
+    try:
+        companion.parent.mkdir(parents=True, exist_ok=True)
+        companion.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        logger.info(
+            "session_storage_saved",
+            path=str(companion),
+            keys=len(raw),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warn("session_storage_save_failed", err=str(exc))
 
 
 @dataclass
@@ -670,6 +726,7 @@ def run_auth(
                 # head start) and surface the external-completion flag.
                 try:
                     sess.context.storage_state(path=str(storage_path))
+                    _save_session_storage(active, storage_path)
                     if on_storage_saved is not None:
                         try:
                             on_storage_saved(str(storage_path))
@@ -728,6 +785,7 @@ def run_auth(
                 )
 
             sess.context.storage_state(path=str(storage_path))
+            _save_session_storage(active, storage_path)
             if on_storage_saved is not None:
                 try:
                     on_storage_saved(str(storage_path))
