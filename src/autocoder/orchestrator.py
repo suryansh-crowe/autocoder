@@ -1302,6 +1302,174 @@ def _storage_state_usable(settings: Settings) -> bool:
         return False
 
 
+_AUTH_GATED_SSO_PHRASES = (
+    "sign in with microsoft",
+    "continue with microsoft",
+    "sign in with google",
+    "continue with google",
+    "sign in with github",
+    "sign in with sso",
+    "single sign-on",
+)
+
+
+def _looks_auth_gated_quick(page) -> bool:
+    """Fast DOM check: is the page showing a visible SSO provider button?
+
+    Mirrors the classifier's ``_looks_auth_gated`` but keeps the scan
+    cheap enough to run on every extraction. ``True`` means "the SPA
+    is sitting on a pre-auth consent/gateway shell" — the caller
+    should attempt silent re-auth before enumerating elements.
+    """
+    import re as _re
+
+    for phrase in _AUTH_GATED_SSO_PHRASES:
+        rx = _re.compile(_re.escape(phrase), _re.IGNORECASE)
+        for role in ("button", "link"):
+            try:
+                loc = page.get_by_role(role, name=rx)
+                if loc.count() == 0:
+                    continue
+                h = loc.first.element_handle()
+                if h and h.is_visible():
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def _silent_reauth(sess, target_url: str, settings: Settings) -> bool:
+    """Trigger MSAL's silent sign-in path in the current browser context.
+
+    Procedure
+    ---------
+    1. Find the visible SSO button on the current page.
+    2. If it is disabled (consent-checkbox gate), tick visible
+       unchecked checkboxes to enable it — same logic the auth
+       runner already uses to unblock a disabled provider button.
+    3. Click the button. Because the Entra tenant cookies were
+       restored from ``storage_state``, the redirect completes
+       without a password/MFA prompt (`/oauth2/authorize` returns a
+       redirect back to the app within a few seconds).
+    4. Wait up to 60s for the page URL to leave
+       ``login.microsoftonline.com`` and return inside ``base_url``.
+    5. Re-navigate to the originally-requested URL so extraction
+       happens against authenticated content.
+
+    Returns ``True`` when the page leaves the consent shell; ``False``
+    when the handshake did not complete (stored tokens expired,
+    tenant requires interactive MFA, or the button could not be
+    clicked).
+    """
+    from autocoder.extract.auth_runner import _unblock_sso_button
+    from autocoder.extract.browser import goto_resilient
+
+    page = sess.page
+    # Find the provider button. We don't care which provider — the
+    # first visible SSO-phrased button is the right one.
+    btn = None
+    import re as _re
+
+    for phrase in _AUTH_GATED_SSO_PHRASES:
+        rx = _re.compile(_re.escape(phrase), _re.IGNORECASE)
+        for role in ("button", "link"):
+            try:
+                loc = page.get_by_role(role, name=rx)
+                if loc.count() == 0:
+                    continue
+                h = loc.first.element_handle()
+                if h and h.is_visible():
+                    btn = loc.first
+                    break
+            except Exception:
+                continue
+        if btn is not None:
+            break
+    if btn is None:
+        return False
+
+    # If the button is gated behind a consent checkbox, try to
+    # unblock it. We reuse the auth runner's helper — feeding it a
+    # minimal fake StableSelector isn't worth it; instead we just
+    # tick visible checkboxes directly here.
+    try:
+        if not btn.is_enabled():
+            for sel in (
+                'input[type="checkbox"]:not(:checked)',
+                '[role="checkbox"][aria-checked="false"]',
+            ):
+                try:
+                    cbs = page.locator(sel)
+                    for i in range(min(cbs.count(), 5)):
+                        cb = cbs.nth(i)
+                        if not cb.is_visible():
+                            continue
+                        try:
+                            cb.check(timeout=2_000)
+                        except Exception:
+                            try:
+                                cb.click(timeout=2_000)
+                            except Exception:
+                                continue
+                        if btn.is_enabled():
+                            break
+                except Exception:
+                    continue
+                if btn.is_enabled():
+                    break
+    except Exception:
+        pass
+
+    try:
+        btn.click(timeout=10_000)
+    except Exception as exc:
+        logger.warn("silent_reauth_click_failed", err=str(exc))
+        return False
+
+    # Wait for the page to leave the IdP and return to the app.
+    entra = "login.microsoftonline.com"
+    app_origin = settings.base_url or target_url
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        try:
+            url = page.url or ""
+        except Exception:
+            url = ""
+        if entra not in url and "/login" not in url and url and url != "about:blank":
+            break
+        try:
+            page.wait_for_timeout(500)
+        except Exception:
+            time.sleep(0.5)
+    else:
+        return False
+
+    # Re-navigate to the original target so extraction works
+    # against the authenticated DOM.
+    try:
+        goto_resilient(
+            page,
+            target_url,
+            nav_timeout_ms=settings.browser.extraction_nav_timeout_ms,
+            diagnostics_dir=settings.paths.logs_dir,
+        )
+    except Exception as exc:
+        logger.warn("silent_reauth_renav_failed", err=str(exc))
+        return False
+
+    # Give the SPA a moment to render its authenticated layout, then
+    # confirm the consent shell is gone.
+    try:
+        page.wait_for_selector(
+            'button, a[href], input, textarea, select, [role="button"]',
+            state="attached",
+            timeout=15_000,
+        )
+    except Exception:
+        pass
+    return not _looks_auth_gated_quick(page)
+
+
 def _extract(node: URLNode, settings: Settings, use_storage: bool) -> PageExtraction | None:
     """Extract one URL. Returns ``None`` on any failure.
 
@@ -1416,6 +1584,53 @@ def _extract_detailed(
                             "genuinely empty, or may be blocked by a network "
                             "dependency. Extraction will still run but is "
                             "likely to return 0 elements."
+                        ),
+                    )
+
+            # Silent re-auth for MSAL-style SPAs. Many single-page apps
+            # that use MSAL.js keep their authenticated account in
+            # ``sessionStorage`` -- which Playwright's ``storage_state``
+            # does NOT persist across contexts (only cookies and
+            # localStorage are saved). So even with a valid session
+            # file, hitting ``/catalog`` directly in a fresh context
+            # often shows the pre-auth consent shell because the SPA
+            # can't find an MSAL account.
+            #
+            # Recovery: if (a) we are running under storage_state and
+            # (b) the page we landed on still shows the SSO entry
+            # shell, click the provider button once. Because the
+            # Entra tenant cookies ARE in storage_state, MSAL will
+            # complete the handshake silently (no MFA re-prompt),
+            # populate sessionStorage, and the SPA will transition to
+            # the authenticated view. We then re-navigate to the
+            # originally-requested URL so the extraction runs against
+            # real content.
+            if use_storage and _looks_auth_gated_quick(sess.page):
+                logger.info(
+                    "extract_silent_reauth_attempt",
+                    slug=node.slug,
+                    hint=(
+                        "page still shows the SSO consent shell after "
+                        "loading storage_state; clicking the provider "
+                        "button to let MSAL hydrate sessionStorage"
+                    ),
+                )
+                if _silent_reauth(sess, node.url, settings):
+                    logger.ok(
+                        "extract_silent_reauth_succeeded",
+                        slug=node.slug,
+                        final_url=logger.safe_url(sess.page.url),
+                    )
+                else:
+                    logger.warn(
+                        "extract_silent_reauth_failed",
+                        slug=node.slug,
+                        final_url=logger.safe_url(sess.page.url),
+                        hint=(
+                            "silent MSAL handshake did not complete within "
+                            "60s. The stored session may be expired, or "
+                            "the tenant requires a fresh MFA. Delete "
+                            ".auth/user.json and rerun to re-capture."
                         ),
                     )
 
