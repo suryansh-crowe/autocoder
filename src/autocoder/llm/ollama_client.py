@@ -14,7 +14,6 @@ Notes:
 from __future__ import annotations
 
 import json
-import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -23,104 +22,12 @@ import httpx
 
 from autocoder import logger
 from autocoder.config import OllamaSettings
+from autocoder.llm._json import strict_system_suffix, try_parse_json
 
 
-_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
-
-
-def _try_parse_json(text: str) -> Any | None:
-    """Best-effort JSON recovery — returns ``None`` if all attempts fail.
-
-    Recovery ladder (cheapest → most aggressive):
-
-    1. Direct ``json.loads`` on the stripped text.
-    2. Strip markdown fences (``` or ```json) and retry.
-    3. Slice the outermost balanced ``{ ... }`` — handles prose
-       around the object and respects strings / escapes so we do not
-       mis-count braces inside quoted values.
-    4. If the payload has an odd number of unescaped quotes, tentatively
-       close the open string and any outstanding braces.
-    """
-    if not text:
-        return None
-    stripped = text.strip()
-
-    # 1. direct
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        pass
-
-    # 2. fences
-    defenced = _FENCE_RE.sub("", stripped).strip()
-    if defenced and defenced != stripped:
-        try:
-            return json.loads(defenced)
-        except json.JSONDecodeError:
-            pass
-
-    candidate = defenced or stripped
-
-    # 3. outermost balanced object
-    start = candidate.find("{")
-    if start != -1:
-        depth = 0
-        in_str = False
-        esc = False
-        for i in range(start, len(candidate)):
-            ch = candidate[i]
-            if esc:
-                esc = False
-                continue
-            if ch == "\\":
-                esc = True
-                continue
-            if ch == '"':
-                in_str = not in_str
-                continue
-            if in_str:
-                continue
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(candidate[start : i + 1])
-                    except json.JSONDecodeError:
-                        break
-
-    # 4. unterminated string / missing closers
-    slice_start = start if start != -1 else 0
-    fragment = candidate[slice_start:]
-    # count unescaped quotes
-    quotes = 0
-    esc = False
-    for ch in fragment:
-        if esc:
-            esc = False
-            continue
-        if ch == "\\":
-            esc = True
-            continue
-        if ch == '"':
-            quotes += 1
-    patched = fragment
-    if quotes % 2 == 1:
-        patched = patched + '"'
-    # close any outstanding braces/brackets naively
-    opens = patched.count("{") - patched.count("}")
-    if opens > 0:
-        patched = patched + ("}" * opens)
-    opens_sq = patched.count("[") - patched.count("]")
-    if opens_sq > 0:
-        patched = patched + ("]" * opens_sq)
-    if patched != fragment:
-        try:
-            return json.loads(patched)
-        except json.JSONDecodeError:
-            return None
-    return None
+# Back-compat alias so existing unit tests and external call sites
+# that imported the private helper keep working.
+_try_parse_json = try_parse_json
 
 
 @dataclass

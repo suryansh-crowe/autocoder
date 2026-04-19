@@ -206,6 +206,39 @@ docker rm -f  autocoder-phi4        # drop the container (volume kept)
 docker volume rm autocoder-ollama-models   # nuke the cached model (~9 GB)
 ```
 
+## Backend selection
+
+The project supports two LLM backends through a single factory at
+`autocoder/llm/factory.py:get_llm_client(settings)`. Both backends
+expose the same `chat_json(system, user, purpose=..., retries=1)`
+signature and both route errors through `OllamaError`, so every
+downstream call site works with either one.
+
+| Backend       | Switch                             | When to use                                                                                              |
+|---------------|------------------------------------|----------------------------------------------------------------------------------------------------------|
+| Ollama local  | `USE_AZURE_OPENAI=false` (default) | Offline / air-gapped development. Slow on CPU but free and private.                                      |
+| Azure OpenAI  | `USE_AZURE_OPENAI=true`            | When iteration speed matters. Phi-4 CPU inference is ~2-4 tok/s; Azure `gpt-4.1` responds in ~1-3s total.|
+
+`.env` keys for the Azure backend:
+
+```env
+USE_AZURE_OPENAI=true
+OPENAI_ENDPOINT=https://<your-resource>.openai.azure.com
+OPENAI_API_KEY=<your-data-plane-key>            # or AZURE_OPENAI_API_KEY
+OPENAI_API_VERSION=2024-12-01-preview
+AZURE_CHAT_DEPLOYMENT=gpt-4.1
+AZURE_CHAT_TEMPERATURE=0.2
+AZURE_CHAT_TOP_P=0.9
+AZURE_CHAT_MAX_TOKENS=2048
+AZURE_CHAT_TIMEOUT_SECONDS=120
+```
+
+The orchestrator logs `llm_backend_selected backend=... endpoint=...`
+once at startup so runs are auditable. The key value is never logged;
+only the **name** of the env var that holds it is persisted to the
+registry / log stream, matching the existing secret-handling rule for
+`LOGIN_PASSWORD`.
+
 ## Client
 
 `autocoder/llm/ollama_client.py` is the only place that talks to

@@ -29,6 +29,7 @@ from autocoder.heal.prompts import (
 from autocoder.heal.pytest_failures import PytestFailure, run_pytest_capture
 from autocoder.heal.scanner import StubInfo, find_stubs_in_dir, find_stubs_in_file
 from autocoder.heal.validator import validate_body
+from autocoder.llm.factory import get_llm_client
 from autocoder.llm.ollama_client import OllamaClient
 
 
@@ -185,12 +186,16 @@ def heal_steps(settings: Settings, opts: HealOptions) -> list[HealResult]:
         logger.ok("heal_done_nothing", reason="no NotImplementedError stubs found")
         return []
 
-    client = OllamaClient(settings.ollama)
+    client = get_llm_client(settings)
     if not client.is_available():
         logger.die(
-            "ollama_unreachable",
-            endpoint=settings.ollama.endpoint,
-            hint="Start the container; see readme/09_llm.md.",
+            "llm_unreachable",
+            backend="azure_openai" if settings.use_azure_openai else "ollama",
+            hint=(
+                "Verify the Azure endpoint/deployment/api-key."
+                if settings.use_azure_openai
+                else "Start the container; see readme/09_llm.md."
+            ),
         )
 
     results: list[HealResult] = []
@@ -518,12 +523,16 @@ def _heal_failures(
         logger.ok("heal_done_nothing", reason="pytest reported no failures")
         return []
 
-    client = OllamaClient(settings.ollama)
+    client = get_llm_client(settings)
     if not client.is_available():
         logger.die(
-            "ollama_unreachable",
-            endpoint=settings.ollama.endpoint,
-            hint="Start the container; see readme/09_llm.md.",
+            "llm_unreachable",
+            backend="azure_openai" if settings.use_azure_openai else "ollama",
+            hint=(
+                "Verify the Azure endpoint/deployment/api-key."
+                if settings.use_azure_openai
+                else "Start the container; see readme/09_llm.md."
+            ),
         )
 
     results: list[HealResult] = []

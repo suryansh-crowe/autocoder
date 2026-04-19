@@ -40,6 +40,7 @@ from autocoder.generate.pom import render_pom
 from autocoder.generate.steps import render_steps
 from autocoder.intake.classifier import classify_urls, looks_like_login_url
 from autocoder.intake.graph import build_dependency_graph, topological_order
+from autocoder.llm.factory import get_llm_client
 from autocoder.llm.ollama_client import OllamaClient
 from autocoder.llm.plans import generate_feature_plan, generate_pom_plan
 from autocoder.registry.diff import diff_extractions
@@ -162,21 +163,27 @@ def run_generate(settings: Settings, opts: GenerateOptions) -> list[StageResult]
         order=",".join(n.slug for n in ordered),
     )
 
-    client: OllamaClient | None = None
+    client = None
     if not opts.skip_llm:
-        client = OllamaClient(settings.ollama)
-        logger.info(
-            "ollama_check",
-            endpoint=settings.ollama.endpoint,
-            model=settings.ollama.model,
+        client = get_llm_client(settings)
+        backend = "azure_openai" if settings.use_azure_openai else "ollama"
+        endpoint = (
+            settings.azure_openai.endpoint
+            if settings.use_azure_openai
+            else settings.ollama.endpoint
         )
+        logger.info("llm_check", backend=backend, endpoint=endpoint)
         if not client.is_available():
             logger.die(
-                "ollama_unreachable",
-                endpoint=settings.ollama.endpoint,
-                hint="Start the container; see readme/09_llm.md.",
+                "llm_unreachable",
+                backend=backend,
+                endpoint=endpoint,
+                hint=(
+                    "Verify the Azure endpoint/deployment/api-key." if settings.use_azure_openai
+                    else "Start the container; see readme/09_llm.md."
+                ),
             )
-        logger.ok("ollama_ready", endpoint=settings.ollama.endpoint, model=settings.ollama.model)
+        logger.ok("llm_ready", backend=backend, endpoint=endpoint)
     else:
         logger.warn("llm_skipped_by_flag", flag="--skip-llm")
 
@@ -895,7 +902,7 @@ def _process_url(
     registry: Registry,
     settings: Settings,
     store: RegistryStore,
-    client: OllamaClient | None,
+    client,  # OllamaClient | AzureOpenAIClient | None — typed loosely on purpose
     opts: GenerateOptions,
 ) -> StageResult:
     issues: list[str] = []

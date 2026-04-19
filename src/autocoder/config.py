@@ -53,6 +53,29 @@ class OllamaSettings:
 
 
 @dataclass(frozen=True)
+class AzureOpenAISettings:
+    """Config for the Azure OpenAI hosted backend.
+
+    Activated by setting ``USE_AZURE_OPENAI=true`` in ``.env``. Every
+    field has an environment override; defaults produce Azure's
+    current GA chat completions shape.
+
+    Only the **name** of the env var that holds the API key is stored
+    on this dataclass — never the key itself — so the key cannot leak
+    through logs or registry yaml.
+    """
+
+    endpoint: str                # e.g. https://<resource>.openai.azure.com
+    api_key_env: str             # name of the env var holding the key
+    api_version: str
+    deployment: str              # Azure deployment name (not the base model)
+    temperature: float
+    top_p: float
+    max_tokens: int
+    timeout_seconds: int
+
+
+@dataclass(frozen=True)
 class BrowserSettings:
     headless: bool
     extraction_timeout_ms: int
@@ -89,7 +112,16 @@ class Settings:
     base_url: str
     login_url: str | None
     log_level: str
+    # LLM backend selection.
+    #
+    # ``use_azure_openai=True`` routes every planner call (POM plan,
+    # feature plan, stub heal, failure heal) to the Azure OpenAI
+    # deployment in ``azure_openai``. The Ollama deployment in
+    # ``ollama`` is still read so you can flip the switch back in
+    # ``.env`` without editing code.
+    use_azure_openai: bool
     ollama: OllamaSettings
+    azure_openai: AzureOpenAISettings
     browser: BrowserSettings
     extraction: ExtractionSettings
     paths: Paths
@@ -100,6 +132,8 @@ class Settings:
             "LOGIN_OTP_SECRET",
             "RBAC_USERNAME",
             "RBAC_PASSWORD",
+            "OPENAI_API_KEY",
+            "AZURE_OPENAI_API_KEY",
         )
     )
 
@@ -140,10 +174,20 @@ def load_settings(project_root: Path | None = None) -> Settings:
         registry_path=manifest_dir / "registry.yaml",
     )
 
+    # The Azure API key has two accepted env var names because SDKs
+    # disagree. We read whichever is set and remember the name (never
+    # the value) so logs and manifest yaml can show presence only.
+    azure_key_env = (
+        "AZURE_OPENAI_API_KEY"
+        if os.environ.get("AZURE_OPENAI_API_KEY", "").strip()
+        else "OPENAI_API_KEY"
+    )
+
     return Settings(
         base_url=os.environ.get("BASE_URL", "").rstrip("/"),
         login_url=os.environ.get("LOGIN_URL") or None,
         log_level=os.environ.get("LOG_LEVEL", "info").strip().lower() or "info",
+        use_azure_openai=_flag("USE_AZURE_OPENAI", False),
         ollama=OllamaSettings(
             endpoint=os.environ.get("OLLAMA_ENDPOINT", "http://localhost:11434").rstrip("/"),
             model=os.environ.get("OLLAMA_MODEL", "phi4:14b"),
@@ -152,6 +196,19 @@ def load_settings(project_root: Path | None = None) -> Settings:
             temperature=_float("OLLAMA_TEMPERATURE", 0.2),
             top_p=_float("OLLAMA_TOP_P", 0.9),
             num_predict=_int("OLLAMA_NUM_PREDICT", 2048),
+        ),
+        azure_openai=AzureOpenAISettings(
+            endpoint=(
+                os.environ.get("AZURE_OPENAI_ENDPOINT")
+                or os.environ.get("OPENAI_ENDPOINT", "")
+            ).rstrip("/"),
+            api_key_env=azure_key_env,
+            api_version=os.environ.get("OPENAI_API_VERSION", "2024-12-01-preview"),
+            deployment=os.environ.get("AZURE_CHAT_DEPLOYMENT", "gpt-4.1"),
+            temperature=_float("AZURE_CHAT_TEMPERATURE", 0.2),
+            top_p=_float("AZURE_CHAT_TOP_P", 0.9),
+            max_tokens=_int("AZURE_CHAT_MAX_TOKENS", 2048),
+            timeout_seconds=_int("AZURE_CHAT_TIMEOUT_SECONDS", 120),
         ),
         browser=BrowserSettings(
             headless=_flag("HEADLESS", True),
