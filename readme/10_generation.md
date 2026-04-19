@@ -211,6 +211,94 @@ Same principle: deterministic template, secrets only via
 `os.environ.get(...)`, single `@pytest.mark.auth_setup` test that
 writes `.auth/user.json`.
 
+## What the generator covers — and what it doesn't
+
+"`autocoder generate` produces all relevant test cases" is not a
+true statement, and the system prompts are explicit about the
+boundaries. The generator trades breadth for reliability and LLM
+token efficiency.
+
+### Covered (given a successful extraction)
+
+- **Smoke** tier: at least one scenario that exercises the primary
+  happy path for the URL.
+- **Happy** tier: at least one success-path scenario covering the
+  most prominent form / button / link flow on the page.
+- **Validation** (on by default): bounded set of validation / edge
+  scenarios the LLM can justify from the extracted elements.
+- Other tiers (`regression`, `edge`, `navigation`, `auth`, `rbac`,
+  `e2e`) on demand via `--tier`.
+
+The system prompt (`FEATURE_SYSTEM` in `llm/prompts.py`) caps output
+at **2–6 scenarios total per URL** with **≤ 6 steps each**. The POM
+plan (`POM_SYSTEM`) is capped at **≤ 20 methods per URL**. Both caps
+are enforced by the validator — the LLM *cannot* produce an
+exhaustive catalog even if asked.
+
+### Not covered (today)
+
+- **Login page tests** — the login URL is deliberately skipped; only
+  the auth-setup test is produced. See `06_auth_first.md`.
+- **Cross-URL workflows** — each URL is planned in isolation. Flows
+  like "login → dashboard → edit profile → logout" require a URL
+  list that covers each hop, plus hand-authored glue features.
+- **Multi-role / RBAC** — single-user only. The hook exists in
+  `AuthSpec.username_env` / `password_env`, but the orchestrator
+  does not render a second `auth_setup` with a different role.
+- **Negative auth scenarios** — "visit protected URL without session
+  → expect redirect to login" is not generated. The LLM only sees
+  the DOM of a successful extraction.
+- **Behavior behind client-side state changes** — elements that only
+  appear after an interaction the extraction did not perform (open
+  a modal, expand a menu, paginate) are invisible to the planner.
+- **Performance, accessibility, visual-regression** — out of scope.
+  Add them yourself as separate pytest modules; they can import the
+  generated POMs.
+
+### Caveat for authenticated SPAs
+
+Authenticated extraction runs with `storage_state` loaded, so
+Playwright sends the session cookies on `page.goto`. That is not
+the same as the URL necessarily *rendering differently*. If an
+authenticated SPA still serves a consent gate, terms-acceptance
+modal, or intro tour on every landing, the extracted DOM is that
+gate — the LLM then writes scenarios about the gate instead of the
+real application.
+
+Two signals that this happened:
+
+1. The post-auth fingerprint equals the pre-auth fingerprint
+   (`manifest/extractions/<slug>.json` unchanged).
+2. The generated scenarios mention consent / sign-in / onboarding
+   even though the test runs with storage loaded.
+
+Workaround: identify the URL the authenticated app actually lands
+on (often a dashboard route that differs from the marketing URL)
+and add that to your input list.
+
+## Runtime self-heal on generated POMs
+
+The generated POM methods do not call raw `self.locate(id).click()`.
+They call `self.click(id)` (and `self.check`, `self.fill`,
+`self.select`) on `BasePage`, which provides a small, deterministic
+self-heal layer:
+
+- If a click target is disabled, ``BasePage._unblock_via_consent``
+  ticks visible unchecked checkboxes (native + ARIA) and retries.
+  Same algorithm the auth runner uses for the SSO-button-behind-a-
+  consent-checkbox pattern.
+- `self.check(id)` is idempotent — no-op if already checked.
+- `self.fill(id, value)` clears the field before filling.
+
+Per-call opt-out is available: `self.click(id, heal=False)`. Use it
+in explicit negative scenarios that assert a disabled state.
+
+This is where the project leans on determinism to compensate for a
+local LLM: scenario order bugs (e.g. LLM puts "click Sign in"
+before "check ToS") stop breaking runs, and brittle DOMs that need
+one tiny interaction before the target is clickable don't require
+an `autocoder heal` call.
+
 ## Why renderers, not LLM-written code
 
 Every Python line the LLM writes is a line that could contain a

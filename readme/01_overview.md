@@ -18,6 +18,11 @@ two planning calls. Everything else is deterministic Python.
 
 ## What it is not
 
+- It is **not** an exhaustive test generator. The feature-plan
+  prompt caps scenarios at 2–6 per URL, 6 steps each, and up to 20
+  POM methods. Default tiers are `smoke,happy,validation`. Add
+  more via `--tier`, but the LLM still picks what fits those caps.
+  See `10_generation.md` for the full coverage contract.
 - It is **not** a one-shot script that emits tests for one URL and
   exits. The system is reusable: invoke it on the same URLs again,
   on new URLs, or to add tiers to an existing URL, and it picks up
@@ -93,6 +98,11 @@ two planning calls. Everything else is deterministic Python.
   full `is/should be/must be [not] checked|visible|enabled|disabled`
   family, negation no-ops), and falls back to `NotImplementedError`
   only when neither binding nor synthesis applies.
+- **Runtime self-heal on generated POM actions** — `BasePage.click /
+  check / fill / select` auto-unblock disabled targets by ticking
+  visible consent checkboxes before retrying. This is the main
+  defence against local-LLM scenario-order mistakes and minor DOM
+  drift between extraction and test time.
 - Generation quality gate: a URL whose step file still has
   `NotImplementedError` bodies ends up `needs_implementation`, not
   `complete`, and the run summary switches to `run_done_with_issues`.

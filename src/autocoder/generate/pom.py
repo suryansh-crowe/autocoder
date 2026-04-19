@@ -96,21 +96,31 @@ def _build_method_body(method, element: Element | None) -> str:
     if element is None:
         return "raise RuntimeError('element missing')"
 
-    locator = f"self.locate({element.id!r})"
+    # Click / check / fill / select go through the self-healing
+    # wrappers on ``BasePage`` so disabled-until-consent buttons are
+    # unblocked automatically at test time (see
+    # ``tests/pages/base_page.py``). The runtime self-heal is a safety
+    # net for two common failure modes: LLM-ordered scenario steps
+    # that trigger a gated button before the consent checkbox, and
+    # captured DOMs that drift slightly between extraction and test.
     if action == "click":
-        return f"{locator}.click()"
+        return f"self.click({element.id!r})"
     if action == "fill":
-        return f"{locator}.fill({method.args[0] if method.args else 'value'})"
+        arg = method.args[0] if method.args else "value"
+        return f"self.fill({element.id!r}, {arg})"
     if action == "select":
-        return f"{locator}.select_option({method.args[0] if method.args else 'value'})"
+        arg = method.args[0] if method.args else "value"
+        return f"self.select({element.id!r}, {arg})"
     if action == "check":
-        return f"{locator}.check()"
+        return f"self.check({element.id!r})"
+
+    locator = f"self.locate({element.id!r})"
     if action == "wait":
         return f"{locator}.wait_for(state='visible')"
     if action == "expect_visible":
         return f"expect({locator}).to_be_visible()"
     if action == "expect_text":
-        arg = method.args[0] if method.args else 'value'
+        arg = method.args[0] if method.args else "value"
         return f"expect({locator}).to_contain_text({arg})"
     return "pass"
 

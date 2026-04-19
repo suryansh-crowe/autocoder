@@ -423,12 +423,46 @@ def _materialise_auth(
     if auth is None:
         return
     setup_path = settings.paths.auth_setup_dir / "test_auth_setup.py"
-    if auth.status == Status.STEPS_READY and setup_path.exists():
+    storage_ok = _storage_state_usable(settings)
+
+    # Fast path: template rendered AND a live session file exists.
+    # Both halves are required — ``status == STEPS_READY`` only means
+    # "we wrote the setup file on the last run", it does not imply the
+    # runner actually captured a session. Without ``.auth/user.json``
+    # we must retry the runner.
+    if auth.status == Status.STEPS_READY and setup_path.exists() and storage_ok:
         logger.info(
             "auth_setup_reused",
             path=str(setup_path),
-            reason="status=steps_ready and file exists",
+            storage_state=str(settings.paths.storage_state),
+            reason="template_and_session_present",
         )
+        return
+
+    # Warm path: template is already on disk and the spec is populated
+    # with real selectors — only the session was never captured.
+    # Skip the re-probe + re-render and jump straight to the runner.
+    spec_has_selectors = (
+        auth.sso_button_selector is not None
+        or auth.username_selector is not None
+        or auth.password_selector is not None
+    )
+    if (
+        auth.status == Status.STEPS_READY
+        and setup_path.exists()
+        and spec_has_selectors
+        and not storage_ok
+    ):
+        logger.info(
+            "auth_session_retry",
+            path=str(setup_path),
+            reason="template_ready_but_no_storage",
+            hint=(
+                "previous run rendered the auth-setup but did not capture "
+                "a session; re-running the in-process auth runner now"
+            ),
+        )
+        _run_and_persist_auth(auth, registry, settings, store)
         return
 
     logger.info("auth_probe_start", url=logger.safe_url(auth.login_url))
@@ -538,18 +572,39 @@ def _materialise_auth(
     # Actually perform the login so the rest of the run has a session.
     # If credentials are missing we log and return — the rendered
     # auth-setup test is still on disk for the user to run manually.
-    result = run_auth(merged, settings)
+    _run_and_persist_auth(merged, registry, settings, store)
+
+
+def _run_and_persist_auth(
+    spec: AuthSpec,
+    registry: Registry,
+    settings: Settings,
+    store: RegistryStore,
+) -> None:
+    """Execute the in-process auth runner and persist the outcome.
+
+    Three terminal states:
+
+    * **ok** — storage_state captured, non-LOGIN nodes stale-marked for
+      re-extraction under the new session.
+    * **awaiting_external_completion** — the runner made progress but
+      the flow needs a human (magic link, OTP, MFA the runner could
+      not satisfy automatically). `AuthSpec.status` is downgraded to
+      ``NEEDS_IMPLEMENTATION`` so the run summary surfaces it.
+    * **any other reason** — logged as ``auth_session_not_captured``
+      with mode-aware hints. Registry auth status is *rolled back* to
+      ``PENDING`` so the next run re-tries the runner instead of
+      silently reusing a "setup ready" marker that never had a session.
+    """
+    result = run_auth(spec, settings)
     if result.ok:
         logger.ok(
             "auth_session_captured",
             storage_state=str(settings.paths.storage_state),
             final_url=logger.safe_url(result.final_url),
-            auth_kind=merged.auth_kind,
+            auth_kind=spec.auth_kind,
             elapsed=f"{result.elapsed_s:.2f}s",
         )
-        # Stale-mark nodes extracted anonymously. The re-extraction
-        # branch inside ``_process_url`` will pick up the authenticated
-        # DOM on this same run thanks to ``use_storage`` widening.
         stale = 0
         for n in registry.nodes.values():
             if n.kind == URLKind.LOGIN:
@@ -562,14 +617,14 @@ def _materialise_auth(
         if stale:
             store.save(registry)
             logger.info("auth_post_capture_invalidated", count=stale)
-    elif result.reason == "awaiting_external_completion":
-        # Partial progress. Mark the spec so the run summary surfaces
-        # it and the user knows to finish the external step.
-        registry.auth = merged.model_copy(
+        return
+
+    if result.reason == "awaiting_external_completion":
+        registry.auth = spec.model_copy(
             update={
                 "requires_external_completion": True,
                 "status": Status.NEEDS_IMPLEMENTATION,
-                "notes": list(merged.notes or []) + [
+                "notes": list(spec.notes or []) + [
                     f"runner_paused_after={result.diagnostics.get('second_step', '?')}",
                 ],
             }
@@ -578,26 +633,50 @@ def _materialise_auth(
         logger.warn(
             "auth_session_awaiting_external",
             reason=result.reason,
-            auth_kind=merged.auth_kind,
+            auth_kind=spec.auth_kind,
             final_url=logger.safe_url(result.final_url),
             elapsed=f"{result.elapsed_s:.2f}s",
             hint=(result.diagnostics or {}).get(
                 "hint", "complete the external step and rerun"
             ),
         )
-    else:
-        logger.warn(
-            "auth_session_not_captured",
-            reason=result.reason,
-            final_url=logger.safe_url(result.final_url),
-            elapsed=f"{result.elapsed_s:.2f}s",
-            hint=(
-                "Set LOGIN_USERNAME/LOGIN_PASSWORD in .env and rerun, "
-                "or run `pytest tests/auth_setup -m auth_setup` with HEADLESS=false "
-                "to complete the flow manually."
-            ),
-            **{f"diag_{k}": v for k, v in (result.diagnostics or {}).items()},
+        return
+
+    # Any other failure: roll back ``status`` so the next run retries
+    # the runner instead of short-circuiting through ``auth_setup_reused``.
+    # Keep the selectors that the probe captured — they are still
+    # correct, there is just no live session tied to them.
+    registry.auth = spec.model_copy(update={"status": Status.PENDING})
+    store.save(registry)
+
+    is_sso = spec.auth_kind in ("sso_microsoft", "sso_generic")
+    if spec.auth_kind == "form":
+        hint = (
+            "Set LOGIN_USERNAME/LOGIN_PASSWORD in .env and rerun, "
+            "or run `pytest tests/auth_setup -m auth_setup` with "
+            "HEADLESS=false to complete the flow manually."
         )
+    elif is_sso:
+        hint = (
+            "SSO flow did not finish. Rerun with HEADLESS=false and "
+            "complete MFA in the visible browser. If the Sign-in "
+            "button stayed disabled, see auth_sso_button_* events for "
+            "the consent-checkbox unblock attempt."
+        )
+    else:
+        hint = (
+            "Auth runner did not capture a session. See diag_* fields "
+            "below; rerun headed to complete any interactive step."
+        )
+    logger.warn(
+        "auth_session_not_captured",
+        reason=result.reason,
+        auth_kind=spec.auth_kind,
+        final_url=logger.safe_url(result.final_url),
+        elapsed=f"{result.elapsed_s:.2f}s",
+        hint=hint,
+        **{f"diag_{k}": v for k, v in (result.diagnostics or {}).items()},
+    )
 
 
 # ---------------------------------------------------------------------------

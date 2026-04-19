@@ -194,5 +194,7 @@ the real success URL, real credentials, real MFA flow.
 | `NotImplementedError: Implement step: ...` | `autocoder heal --slug <slug>` |
 | Playwright timeout / disabled / pointer-intercepted | `autocoder heal --from-pytest --slug <slug>` |
 | Generated POM points at the wrong widget (e.g. `fill_email` on a checkbox) | `autocoder generate --force <url>` — the inspector distinguishes `<input type=checkbox>` from text inputs. |
+| Click fails with `element is not enabled` | Should self-heal. If it doesn't, the control depending on the button isn't a checkbox; hand-edit the POM method or add the prerequisite to the scenario. `BasePage.click(id, heal=False)` opts out for negative tests. |
+| Tests for `/stewie` (or any authenticated URL) describe the consent shell, not the real app | The authenticated DOM at that URL equals the anonymous DOM. Extract the real authenticated landing URL instead (e.g. `/dashboard` after sign-in) and add it to your input list. See `10_generation.md` → "Caveat for authenticated SPAs". |
 
 Full docs: `readme/README.md` (15 numbered docs + `17_heal.md`).

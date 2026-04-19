@@ -113,6 +113,25 @@ captured traces from `--tracing on`.
 changed, the regenerated POM/features carry the new state and the
 tests still pass without manual intervention.
 
+## Runtime self-heal on generated actions
+
+Generated POM methods call `self.click(id)` / `self.check(id)` /
+`self.fill(id, v)` / `self.select(id, v)` on `tests/pages/base_page.py`,
+not raw Playwright methods. `BasePage` provides a small deterministic
+self-heal layer:
+
+- **Disabled click target** — ticks visible unchecked consent
+  checkboxes (native `input[type=checkbox]` + ARIA
+  `[role=checkbox][aria-checked=false]`) and retries the click.
+  Covers the "Sign in is disabled until Terms is checked" pattern.
+- **`self.check(id)`** — idempotent; no-op if the box is already
+  checked.
+- **`self.fill(id, v)`** — clears the field before filling.
+
+Negative scenarios that deliberately assert a disabled state should
+opt out: `self.click(id, heal=False)`. See `10_generation.md` for
+the full contract.
+
 ## Why generated steps may raise NotImplementedError
 
 The renderer tries three things before giving up on a step:

@@ -253,6 +253,91 @@ def _run_username_first_flow(
     return "no_second_step"
 
 
+def _unblock_sso_button(page: Page, sso_selector: StableSelector) -> bool:
+    """Tick consent checkboxes until the SSO button becomes enabled.
+
+    Many apps render a "Sign in with Microsoft" button that is
+    ``disabled`` until a Terms-of-Service / privacy checkbox is
+    ticked. We detect that state and tick visible unchecked
+    checkboxes in order until either:
+
+    * the button reports ``is_enabled() == True``, or
+    * we run out of candidates.
+
+    Returns ``True`` when the button is enabled (either because it
+    already was, or because we unblocked it). Ticking consent
+    checkboxes is safe: the user has already provided their
+    credentials in the env, which is an implicit green light.
+    """
+    try:
+        btn = _locate(page, sso_selector).first
+    except Exception:
+        return False
+    try:
+        if btn.is_enabled():
+            return True
+    except Exception:
+        return False
+
+    logger.info(
+        "auth_sso_button_disabled",
+        hint=(
+            "SSO button is disabled — attempting to tick visible consent "
+            "checkboxes so the button becomes enabled."
+        ),
+    )
+
+    # Try native HTML checkboxes first, then ARIA role-based checkboxes
+    # (used by React/MUI/Chakra wrappers).
+    ticked = 0
+    for sel in (
+        'input[type="checkbox"]:not(:checked)',
+        '[role="checkbox"][aria-checked="false"]',
+    ):
+        try:
+            loc = page.locator(sel)
+            count = min(loc.count(), 5)
+        except Exception:
+            continue
+        for i in range(count):
+            cb = loc.nth(i)
+            try:
+                if not cb.is_visible():
+                    continue
+                cb.check(timeout=3_000)
+                ticked += 1
+            except Exception:
+                # Some consent controls are rendered as labels; fall
+                # back to clicking the parent label.
+                try:
+                    cb.click(timeout=2_000)
+                    ticked += 1
+                except Exception:
+                    continue
+            # After each tick, re-probe the SSO button.
+            try:
+                if btn.is_enabled():
+                    logger.info(
+                        "auth_sso_button_unblocked",
+                        ticked=ticked,
+                        via=sel,
+                    )
+                    return True
+            except Exception:
+                pass
+    logger.warn(
+        "auth_sso_button_still_disabled",
+        ticked=ticked,
+        hint=(
+            "Could not find a consent checkbox that enables the SSO "
+            "button. If there is a custom control (dropdown, radio, "
+            "terms modal) it must be completed manually once with "
+            "HEADLESS=false."
+        ),
+    )
+    return False
+
+
 def _run_microsoft_sso_flow(
     context,
     page: Page,
@@ -290,6 +375,13 @@ def _run_microsoft_sso_flow(
         popup_ctx["p"] = p
 
     context.on("page", _on_popup)
+
+    # Consent-first pattern: many apps ship a "Sign in with Microsoft"
+    # button that is disabled until the user ticks a Terms-of-Service
+    # / Privacy-Policy checkbox. Tick any visible unchecked consent
+    # checkbox and see if that enables the button.
+    _unblock_sso_button(page, spec.sso_button_selector)
+
     _locate(page, spec.sso_button_selector).click()
 
     # Give the popup a beat to appear. If it does, switch to it.
@@ -508,6 +600,7 @@ def run_auth(
                         reason="sso_generic_no_button",
                         elapsed_s=time.monotonic() - started,
                     )
+                _unblock_sso_button(sess.page, spec.sso_button_selector)
                 _locate(sess.page, spec.sso_button_selector).click()
                 # Best-effort credential fill. Any step that fails is
                 # treated as "the user is about to interact with this";
@@ -631,11 +724,30 @@ def run_auth(
                 diagnostics={"nav": diag.to_dict()},
             )
     except Exception as exc:  # noqa: BLE001
+        err = str(exc)
+        hint = ""
+        lower = err.lower()
+        if "not enabled" in lower or "element is not enabled" in lower:
+            hint = (
+                "An element the runner tried to interact with was disabled. "
+                "Typical cause: a Terms-of-Service / consent checkbox must be "
+                "ticked before the Sign-in button enables. The runner now "
+                "auto-ticks visible checkboxes; if it still fails, the control "
+                "is non-standard — run `HEADLESS=false pytest tests/auth_setup "
+                "-m auth_setup` and complete it by hand once."
+            )
+        elif "timeout" in lower and "waiting for" in lower:
+            hint = (
+                "Click target never became clickable. Likely a disabled "
+                "button (consent checkbox missing) or a page that navigated "
+                "away before the click landed. Rerun with HEADLESS=false and "
+                "watch the browser."
+            )
         return AuthRunResult(
             ok=False,
             reason="auth_runner_exception",
             elapsed_s=time.monotonic() - started,
-            diagnostics={"err": str(exc)},
+            diagnostics={"err": err, "hint": hint} if hint else {"err": err},
         )
 
 

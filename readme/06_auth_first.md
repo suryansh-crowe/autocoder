@@ -189,6 +189,23 @@ Events: `auth_escalation_retry`, `auth_escalation_succeeded`, and
 `auth_escalation_failed` with the same diagnostics payload
 (`final_url`, `redirects`, `err`).
 
+## What auth-first does *not* generate
+
+The login URL itself never gets a POM, feature file, or step module.
+In the per-URL loop (`orchestrator.py:195`), any URL whose `kind ==
+LOGIN` and whose `url == registry.auth.login_url` is short-circuited
+to `status=COMPLETE` with reason `login_url_covered_by_auth_setup`.
+This is intentional: the auth-setup test already exercises the full
+login flow, so a duplicate `tests/features/login.feature` would be
+redundant and would race for the same storage_state file.
+
+Consequence: if you want Gherkin scenarios that assert *login-page*
+behavior (for example: "Given I am on the login page, Then the
+Microsoft SSO button is visible"), you have to author those by hand
+or point `autocoder generate` at a *different* login-adjacent URL
+(e.g. `/login/help`). The tool deliberately does not synthesize
+login-page scenarios today.
+
 ## The generated auth-setup test
 
 `autocoder/generate/auth_setup.py` ships four templates, selected by
