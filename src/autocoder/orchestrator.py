@@ -628,6 +628,38 @@ def _process_url(
         and settings.paths.storage_state.exists()
         and settings.paths.storage_state.stat().st_size > 0
     )
+
+    # If the node needs auth but no session is available, don't
+    # silently generate tests against the anonymous shell — that
+    # produces misleading artifacts ("test the real app" pointing at a
+    # sign-in prompt). Mark and skip; the user can rerun once
+    # `.auth/user.json` has been captured.
+    if node.requires_auth and not auth_ready and node.kind != URLKind.LOGIN:
+        node.status = Status.NEEDS_IMPLEMENTATION
+        note = "skipped_generation_awaiting_auth_session"
+        if note not in node.notes:
+            node.notes.append(note)
+        store.upsert_node(registry, node)
+        logger.warn(
+            "url_skipped_awaiting_auth",
+            slug=node.slug,
+            url=logger.safe_url(node.url),
+            hint=(
+                "node is auth-gated but no storage_state is available. "
+                "Complete the auth flow (see auth_session_* logs above) "
+                "and rerun — extraction will capture the authenticated "
+                "DOM and generate real tests."
+            ),
+        )
+        return StageResult(
+            node=node,
+            extraction=None,
+            pom_path=Path(node.pom_path) if node.pom_path else None,
+            feature_path=Path(node.feature_path) if node.feature_path else None,
+            steps_path=Path(node.steps_path) if node.steps_path else None,
+            issues=["skipped: awaiting authenticated session"],
+        )
+
     use_storage = (
         node.requires_auth
         or node.kind == URLKind.AUTHENTICATED

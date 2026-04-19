@@ -70,8 +70,14 @@ two planning calls. Everything else is deterministic Python.
   magic-link, OTP, Microsoft/Azure SSO, generic SSO, unknown — and
   actually performs the login in-process, writing `.auth/user.json`
   for the rest of the run and for subsequent pytest invocations.
-  Non-password flows (SSO, email-only, magic-link, OTP) are handled
-  without requiring `LOGIN_PASSWORD`.
+  Only inline-form login requires `LOGIN_PASSWORD`; SSO and all
+  non-password flows accept `LOGIN_USERNAME` alone and wait for
+  interactive MFA completion when run headed.
+- Auth-gated shell detection: a page that loads anonymously but
+  whose only interactive affordance is a "Sign in with Microsoft"
+  button is marked `requires_auth=True` at classify time, so the
+  orchestrator never generates tests against the pre-login shell
+  of a gated app.
 - Homepage reachability probe: when `base_url` is not in the input
   URL list, it is classified once to catch apps whose landing page
   is gated but whose deep-linked inputs happen to render a neutral

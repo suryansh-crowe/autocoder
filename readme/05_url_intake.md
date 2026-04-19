@@ -59,6 +59,35 @@ in the path (`login`, `signin`, `sso`, `auth`, …) and a check for an
 positives are cheap (one extra auth attempt); false negatives are
 caught at extraction time when the page redirects to login.
 
+### Auth-gated shell detection
+
+A page can legitimately load anonymously (HTTP 200) and still not be
+"public" in any meaningful sense — a common shape is a site that
+renders a tiny landing shell whose only interactive control is a
+"Sign in with Microsoft" button, with the real app gated behind it.
+
+After the `kind` verdict, `_looks_auth_gated(page)` scans the live
+DOM for two additional signals:
+
+1. **A visible SSO provider button** whose accessible name matches
+   phrases like `"Sign in with Microsoft"`, `"Continue with Google"`,
+   `"Sign in with SSO"`, `"Single sign-on"`, …
+2. **A prominent auth-wall message** like `"Sign in to continue"`,
+   `"Authentication required"`, `"Please sign in"`, `"Login required"`.
+
+If either is present on a page already classified `PUBLIC`, the
+classifier leaves `kind=PUBLIC` but sets `requires_auth=True` and
+appends `auth_gated_shell_detected` to the node's notes. It also
+emits `classify_auth_gated_shell` with the URL + a hint. The
+orchestrator reads `requires_auth` (not `kind`) when deciding whether
+to run auth-first and whether to reuse `storage_state`, so the
+shell-page case is handled correctly without muddying the `LOGIN`
+kind.
+
+The full list of phrases lives in `_AUTH_GATED_PHRASES` in
+`intake/classifier.py`. Extend it in lock-step with any new SSO
+providers.
+
 ## Login URL discovery
 
 If your `.env` does not set `LOGIN_URL`, the classifier returns

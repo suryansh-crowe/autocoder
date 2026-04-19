@@ -218,13 +218,15 @@ _ASSERTION_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
      "expect({locator}).to_be_enabled()"),
 )
 
-# Covers both "page" suffix and common synonyms users write in step
-# text: homepage, dashboard, landing, home, site, app.
+# Covers "page" suffix and common synonyms: homepage, dashboard,
+# landing, home, site, app. Subject can be any of:
+# "the user is/am/are on …", "I am/'m on …", "one opens …",
+# "navigates to …", "visits …", "goes to …", "lands on …".
 _NAV_PATTERN = re.compile(
-    r"\bis\s+on\s+(?:the\s+)?.+\b(page|homepage|home\s*page|landing|dashboard|home|site|app)\b"
-    r"|\bopens?\s+(?:the\s+)?.+\b(page|homepage|home\s*page|landing|dashboard|home|site|app)\b"
-    r"|\bnavigates?\s+to\s+(?:the\s+)?.+\b(page|homepage|home\s*page|landing|dashboard|home|site|app)\b"
-    r"|\bvisits?\s+(?:the\s+)?.+\b(page|homepage|home\s*page|landing|dashboard|home|site|app)\b",
+    r"\b(?:is|am|are|'m|'re)\s+(?:on|at|in)\s+(?:the\s+)?.+\b"
+    r"(page|homepage|home\s*page|landing|dashboard|home|site|app)\b"
+    r"|\b(?:opens?|navigates?\s+to|visits?|goes?\s+to|lands?\s+on)\s+(?:the\s+)?.+\b"
+    r"(page|homepage|home\s*page|landing|dashboard|home|site|app)\b",
     re.IGNORECASE,
 )
 

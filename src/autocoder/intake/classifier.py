@@ -74,6 +74,76 @@ def _looks_like_login_page(page: Page) -> bool:
     return True  # password field alone is enough signal
 
 
+# Phrases that, when present on an anonymously-reachable page, mean
+# "the real app is behind this prompt; do not treat what you see as
+# the authenticated experience". These are deliberately conservative
+# — common CTAs on truly public marketing pages ("Sign up", "Try
+# free") are NOT in the list.
+_AUTH_GATED_PHRASES: tuple[str, ...] = (
+    "sign in with microsoft",
+    "continue with microsoft",
+    "login with microsoft",
+    "sign in with google",
+    "continue with google",
+    "sign in with github",
+    "continue with github",
+    "sign in with sso",
+    "single sign-on",
+    "sign in to continue",
+    "please sign in",
+    "you must sign in",
+    "login required",
+    "authentication required",
+)
+
+
+def _looks_auth_gated(page: Page) -> bool:
+    """Return True when an anonymously-loaded page advertises an auth wall.
+
+    Two signals, either is sufficient:
+
+    1. A visible provider button whose accessible name matches a
+       known SSO phrase (Microsoft / Google / GitHub / generic SSO).
+    2. Prominent "Sign in to continue" / "Authentication required"
+       text on the page.
+
+    We use this in addition to the existing password-field / redirect
+    checks so that:
+
+    * A "shell" page that renders only an SSO button (and maybe a
+      terms-of-service checkbox) is flagged as auth-gated instead of
+      ``PUBLIC``.
+    * The orchestrator then knows to run auth-first and re-extract
+      the URL under storage_state after the session is captured.
+    """
+    import re as _re
+
+    for phrase in _AUTH_GATED_PHRASES:
+        # Role-name matches are the most reliable and also the cheapest.
+        regex = _re.compile(_re.escape(phrase), _re.IGNORECASE)
+        for role in ("button", "link"):
+            try:
+                loc = page.get_by_role(role, name=regex)
+                if loc.count() > 0:
+                    h = loc.first.element_handle()
+                    if h and h.is_visible():
+                        return True
+            except Exception:
+                continue
+        # Fallback: any visible text match. Only trigger when the
+        # phrase appears as a distinct element, not inside a policy
+        # blob, by checking for a tag-scoped text match.
+        try:
+            txt = page.get_by_text(regex)
+            if txt.count() > 0:
+                h = txt.first.element_handle()
+                if h and h.is_visible():
+                    return True
+        except Exception:
+            continue
+    return False
+
+
 def classify_urls(
     urls: Iterable[str],
     settings: Settings,
@@ -161,6 +231,27 @@ def classify_urls(
                 else:
                     node.kind = URLKind.PUBLIC
                     reason = "no_password_field_no_login_redirect"
+
+                # Whatever we decided above, also check for an
+                # auth-wall affordance (SSO button, "Sign in to
+                # continue" prompt). When present on a page that is
+                # not already a LOGIN page, mark it as requiring an
+                # authenticated session: the anonymous DOM we captured
+                # is the pre-auth shell, not the real application.
+                if node.kind == URLKind.PUBLIC and _looks_auth_gated(page):
+                    node.requires_auth = True
+                    node.notes.append("auth_gated_shell_detected")
+                    reason = f"{reason}+auth_gated_shell"
+                    logger.info(
+                        "classify_auth_gated_shell",
+                        slug=slug,
+                        url=logger.safe_url(raw_url),
+                        hint=(
+                            "page has a visible SSO / sign-in affordance; "
+                            "re-extraction under storage_state will capture "
+                            "the authenticated view"
+                        ),
+                    )
 
                 if status is not None and status >= 400:
                     node.notes.append(f"http_status={status}")

@@ -26,7 +26,7 @@ from __future__ import annotations
 from autocoder.models import AuthSpec, SelectorStrategy, StableSelector
 
 
-_TEMPLATE_FORM = '''"""Generated auth setup (form flow). Captures storage_state to {storage_state_path}."""
+_TEMPLATE_FORM = '''"""Generated auth setup (form flow). Captures storage_state to {storage_state_display}."""
 
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ def test_auth_setup(page: Page) -> None:
 '''
 
 
-_TEMPLATE_USERNAME_FIRST = '''"""Generated auth setup (username-first flow). Captures storage_state to {storage_state_path}."""
+_TEMPLATE_USERNAME_FIRST = '''"""Generated auth setup (username-first flow). Captures storage_state to {storage_state_display}."""
 
 from __future__ import annotations
 
@@ -177,7 +177,7 @@ def test_auth_setup(page: Page) -> None:
 '''
 
 
-_TEMPLATE_SSO_MS = '''"""Generated auth setup (Microsoft SSO flow). Captures storage_state to {storage_state_path}."""
+_TEMPLATE_SSO_MS = '''"""Generated auth setup (Microsoft SSO flow). Captures storage_state to {storage_state_display}."""
 
 from __future__ import annotations
 
@@ -287,9 +287,18 @@ def render_auth_setup(spec: AuthSpec, *, storage_state_path: str) -> str:
     else:
         wait_block = "page.wait_for_load_state('networkidle')"
 
+    # Windows paths contain backslashes; dropping one verbatim into a
+    # docstring makes Python parse it as a unicode escape
+    # (``\U...``, ``\a``, ``\t``, ...). Use a POSIX-style rendering
+    # for human-readable substitutions, and keep ``!r`` (which uses
+    # ``repr`` and escapes backslashes) for the real ``Path(...)``
+    # call inside the generated code.
+    storage_state_display = storage_state_path.replace("\\", "/")
+
     if spec.auth_kind in ("sso_microsoft", "sso_generic"):
         return _TEMPLATE_SSO_MS.format(
             storage_state_path=storage_state_path,
+            storage_state_display=storage_state_display,
             login_url=spec.login_url,
             username_env=spec.username_env,
             password_env=spec.password_env,
@@ -302,6 +311,7 @@ def render_auth_setup(spec: AuthSpec, *, storage_state_path: str) -> str:
     if spec.auth_kind == "username_first":
         return _TEMPLATE_USERNAME_FIRST.format(
             storage_state_path=storage_state_path,
+            storage_state_display=storage_state_display,
             login_url=spec.login_url,
             username_env=spec.username_env,
             password_env=spec.password_env,
@@ -317,6 +327,7 @@ def render_auth_setup(spec: AuthSpec, *, storage_state_path: str) -> str:
     if spec.auth_kind in ("email_only", "magic_link", "otp_code"):
         return _TEMPLATE_EMAIL_ONLY.format(
             storage_state_path=storage_state_path,
+            storage_state_display=storage_state_display,
             login_url=spec.login_url,
             username_env=spec.username_env,
             username_locator=_render_locator(
@@ -334,6 +345,7 @@ def render_auth_setup(spec: AuthSpec, *, storage_state_path: str) -> str:
     # hand-edit the selectors.
     return _TEMPLATE_FORM.format(
         storage_state_path=storage_state_path,
+        storage_state_display=storage_state_display,
         login_url=spec.login_url,
         username_env=spec.username_env,
         password_env=spec.password_env,

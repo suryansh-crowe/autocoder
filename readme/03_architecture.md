@@ -115,7 +115,8 @@ that is the user-facing path in `.env` and CLI output.
 | Dependency ordering | `autocoder/intake/graph.py` | Pure function over `URLNode`s; deterministic. |
 | Resilient navigation | `autocoder/extract/browser.py:goto_resilient` | Tiered `commit`/`domcontentloaded`/`networkidle` strategy + diagnostics dump on timeout. Reused by classifier, auth probe, auth runner, and extract. |
 | Auth-mode inference | `autocoder/extract/auth_probe.py` | Picks one of 8 `auth_kind` values from page shape (form / SSO / username-first / email-only / magic-link / OTP / unknown). |
-| In-process login | `autocoder/extract/auth_runner.py` | Actually performs the login during `autocoder generate` and writes `.auth/user.json`. Mode-aware credential gating. |
+| Auth-gated shell detection | `autocoder/intake/classifier.py:_looks_auth_gated` | Flags anonymously-reachable pages whose only interactive affordance is an SSO / sign-in button; sets `requires_auth=True` without changing `kind`. |
+| In-process login | `autocoder/extract/auth_runner.py` | Actually performs the login during `autocoder generate` and writes `.auth/user.json`. Mode-aware credential gating — password only required for `form`. SSO modes wait up to `AUTH_INTERACTIVE_TIMEOUT_MS` (default 300s headed / 90s headless) for interactive MFA completion. |
 | Homepage probe | `autocoder/orchestrator.py:_probe_homepage` | Catches apps whose base URL is gated but no input URL happened to be. |
 | Stable selectors | `autocoder/extract/selectors.py` | The generation-time half of the locator strategy. |
 | Self-healing locators | `tests/support/locator_strategy.py` | The runtime half; lives with the suite so generated POMs need no extra imports. |

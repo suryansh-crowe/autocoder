@@ -26,7 +26,7 @@ class DashboardPage(BasePage):
         super().__init__(page, self.SELECTORS)
 
     def navigate(self) -> None:
-        self.page.goto(self.URL)
+        self.page.goto(self.URL, wait_until="domcontentloaded")
 
     def fill_search(self, value: str) -> None:
         """Search assets..."""
@@ -48,7 +48,7 @@ Action → body mapping is:
 | `wait`            | `self.locate(id).wait_for(state='visible')`               |
 | `expect_visible`  | `expect(self.locate(id)).to_be_visible()`                 |
 | `expect_text`     | `expect(self.locate(id)).to_contain_text(value)`          |
-| `navigate`        | `self.navigate()` (uses class-level `URL`)                |
+| `navigate`        | `self.navigate()` (uses class-level `URL`, `wait_until="domcontentloaded"` to match the extraction-time strategy and avoid headed-mode timeouts on SPAs whose telemetry prevents the `load` event from firing) |
 
 ## Feature render
 
@@ -150,9 +150,13 @@ When the LLM's feature plan leaves `pom_method=null`, the renderer
 inspects the step text + the extracted element catalog + the POM
 method list and picks a body in this order:
 
-1. **Navigation** — step text matches `is on the X page|homepage|
-   dashboard|landing|home|site|app`, `opens the X`, `navigates to
-   the X`, `visits the X`. Emits `fixture.navigate()`.
+1. **Navigation** — step text matches a navigation pattern. The
+   subject can be any of `is/am/are/'m/'re on|at|in` (so both "the
+   user is on the login page" and "I am on the login page" match),
+   and the verb can be any of `opens`, `navigates to`, `visits`,
+   `goes to`, `lands on`. The object accepts `page`, `homepage`,
+   `home page`, `landing`, `dashboard`, `home`, `site`, or `app`.
+   Emits `fixture.navigate()`.
 2. **Fuzzy POM method match** (only for `Given`/`When`/`And`/`But`
    that are not negated). Tokens of the step text are matched against
    `{method_name.split('_')}`; methods sharing ≥ 2 tokens win. The

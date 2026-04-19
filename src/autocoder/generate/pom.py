@@ -50,7 +50,10 @@ class {class_name}(BasePage):
         super().__init__(page, self.SELECTORS)
 
     def navigate(self) -> None:
-        self.page.goto(self.URL)
+        # ``domcontentloaded`` matches the extraction-time wait ladder
+        # and avoids timing out on SPAs whose telemetry/analytics
+        # requests prevent the ``load`` event from firing inside 30s.
+        self.page.goto(self.URL, wait_until="domcontentloaded")
 '''
 
 

@@ -45,8 +45,12 @@ deterministic.
 │       otp_code | sso_microsoft | sso_generic | unknown_auth    │
 │   ─ renders tests/auth_setup/test_auth_setup.py from the       │
 │     template that matches the mode                             │
-│   ─ RUNS THE LOGIN in-process (auth_runner), writing           │
-│     .auth/user.json on success                                 │
+│   ─ RUNS THE LOGIN in-process (auth_runner). Password is only  │
+│     required for inline-form login; SSO modes accept username- │
+│     only and wait up to AUTH_INTERACTIVE_TIMEOUT_MS (default   │
+│     300s headed / 90s headless) for interactive MFA completion │
+│   ─ writes .auth/user.json ONLY after _wait_success confirms   │
+│     the page left login.microsoftonline.com and /login         │
 │   ─ on success, stale-marks every non-LOGIN node so the next   │
 │     pass re-extracts under the session                         │
 │   ─ on awaiting_external_completion, persists any cookies the  │
@@ -61,6 +65,9 @@ deterministic.
 │   ─ uses storage_state when auth is ready, INCLUDING for       │
 │     nodes classified PUBLIC (anonymous classification does not │
 │     prove the authenticated DOM is identical)                  │
+│   ─ skips protected nodes entirely when requires_auth=True     │
+│     but no storage_state exists yet (logs url_skipped_         │
+│     awaiting_auth; marks node needs_implementation)            │
 │   ─ goto_resilient with redirect chain + console errors +      │
 │     failed requests captured as diagnostics                    │
 │   ─ if goto lands on a login-shaped URL, _maybe_escalate_to_   │

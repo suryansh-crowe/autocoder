@@ -68,38 +68,58 @@ def _locate(page: Page, sel: StableSelector):
     return page.locator(sel.value)
 
 
-_PASSWORD_MODES = {"form", "sso_microsoft", "sso_generic"}
-# Modes that need only a username/email. Password is ignored if set.
-_USERNAME_ONLY_MODES = {"username_first", "email_only", "magic_link", "otp_code"}
+# Modes where a password on the **app's own** login form is required
+# to even begin the flow. SSO modes are deliberately NOT in this set:
+# the password (if any) is entered on the IdP's page, and many enterprise
+# tenants don't use one at all (conditional access + device trust + MFA).
+_APP_PASSWORD_MODES = {"form"}
+
+# Modes that could *benefit* from a password if one is configured (we
+# will fill it on the IdP side if the page asks), but can also complete
+# interactively or via SSO cookies without one.
+_SSO_MODES = {"sso_microsoft", "sso_generic"}
 
 
 def _credentials(spec: AuthSpec) -> tuple[str | None, str | None, str]:
     """Return ``(username, password, reason)``.
 
     ``reason`` is ``"ok"`` when the env is sufficient for ``spec.auth_kind``.
-    Otherwise it is a short machine-readable code (``missing_username``,
-    ``missing_password``) so the caller can surface a precise error.
+    Otherwise it is a short machine-readable code the caller surfaces.
 
-    Password is only *required* for modes that actually use one on the
-    app's own page. For SSO modes the password is needed on the IdP
-    side, so we still require it. For email-only / magic-link / OTP /
-    username-first, we accept username-only and leave password empty.
+    Rules:
+
+    * Every mode requires a username (``missing_username`` otherwise).
+    * ``form``: also requires a password (``missing_password`` otherwise).
+    * ``sso_microsoft`` / ``sso_generic``: password is **optional**. The
+      runner will fill it on the IdP page only if the page presents a
+      password field AND the env supplied one; if it does not, the
+      flow waits for interactive completion (typical for MFA-enabled
+      enterprise tenants).
+    * Every other mode (``username_first``, ``email_only``,
+      ``magic_link``, ``otp_code``, ``unknown_auth``): username only.
     """
     username = os.environ.get(spec.username_env, "").strip() or None
     password = os.environ.get(spec.password_env, "").strip() or None
 
     if not username:
         return None, None, "missing_username"
-    if spec.auth_kind in _PASSWORD_MODES and not password:
+    if spec.auth_kind in _APP_PASSWORD_MODES and not password:
         return username, None, "missing_password"
-    if spec.auth_kind == "username_first" and not password:
-        # Username-first commonly redirects to an IdP that *does* need a
-        # password. We still let the runner click Next and see what the
-        # second screen asks for — if it is a password field, we bail
-        # with a clear error there; if it is another SSO tile, we may
-        # still capture storage.
-        return username, None, "password_optional"
     return username, password, "ok"
+
+
+def _interactive_timeout_ms(settings: Settings) -> int:
+    """How long the runner waits for the authenticated state to arrive.
+
+    Headed runs deserve a generous window because the user may need to
+    complete MFA (Authenticator push, number-matching, SMS). Headless
+    runs get a shorter window because nothing is interactive anyway —
+    if SSO cookies do not land a session inside 90s, they won't.
+    """
+    override = os.environ.get("AUTH_INTERACTIVE_TIMEOUT_MS", "").strip()
+    if override.isdigit():
+        return int(override)
+    return 300_000 if not settings.browser.headless else 90_000
 
 
 def _wait_success(
@@ -238,12 +258,27 @@ def _run_microsoft_sso_flow(
     page: Page,
     spec: AuthSpec,
     username: str,
-    password: str,
+    password: str | None,
 ) -> Page:
     """Click the provider button and drive the Entra page.
 
     Returns the :class:`Page` we should observe for success (the SSO
     flow may happen in the original tab *or* in a popup; we handle both).
+
+    Password handling:
+
+    * If ``password`` is provided and the Entra page renders a
+      password input, we fill + submit it.
+    * If ``password`` is ``None`` **or** the password input never
+      appears within the short wait window, we leave the page where
+      it is — the MFA / number-match / passwordless screen the user
+      sees will be completed interactively (headed mode) or will
+      time out cleanly in ``_wait_success`` (headless mode).
+
+    The previous implementation raised on a missing password field;
+    that broke passwordless / MFA-first tenants. Now we treat a
+    missing password input as a signal that we should hand control to
+    the user rather than as a fatal error.
     """
     assert spec.sso_button_selector is not None
 
@@ -312,27 +347,53 @@ def _run_microsoft_sso_flow(
         except Exception:
             pass
 
-    # Password field.
+    # Password field — best-effort. If the field is absent or we do
+    # not have a password configured, we simply hand off to
+    # ``_wait_success`` which gives the user a long window to finish
+    # the flow interactively (MFA, passwordless, SMS, number-match).
     pwd_css = os.environ.get(
         "AUTH_MSFT_PASSWORD_SELECTOR", 'input[name="passwd"], input[type="password"]'
     )
+    pwd_appeared = False
     try:
-        active.locator(pwd_css).first.fill(password, timeout=45_000)
-    except PWTimeout as exc:
-        raise RuntimeError(
-            "Entra password field did not appear — tenant may require MFA "
-            "or a hardware token. Run the rendered auth-setup test with "
-            "HEADLESS=false to complete the flow manually once."
-        ) from exc
+        active.locator(pwd_css).first.wait_for(state="visible", timeout=15_000)
+        pwd_appeared = True
+    except PWTimeout:
+        logger.info(
+            "auth_sso_password_input_absent",
+            hint=(
+                "No password input on the Entra page within 15s — tenant "
+                "may be passwordless / MFA-first. Waiting for interactive "
+                "completion."
+            ),
+        )
 
-    submit_css = os.environ.get(
-        "AUTH_MSFT_SUBMIT_SELECTOR",
-        '#idSIButton9, input[type="submit"], button[type="submit"]',
-    )
-    try:
-        active.locator(submit_css).first.click(timeout=10_000)
-    except Exception:
-        pass
+    if pwd_appeared and password:
+        try:
+            active.locator(pwd_css).first.fill(password, timeout=10_000)
+        except Exception:
+            pass
+    elif pwd_appeared and not password:
+        logger.info(
+            "auth_sso_password_requested_but_absent",
+            hint=(
+                "Entra requested a password but LOGIN_PASSWORD is not set. "
+                "User must complete entry interactively (HEADLESS=false)."
+            ),
+        )
+
+    # Only click the post-password submit when we actually filled a
+    # password. Otherwise we risk skipping past an MFA / passwordless
+    # prompt the user is about to interact with.
+    if pwd_appeared and password:
+        submit_css = os.environ.get(
+            "AUTH_MSFT_SUBMIT_SELECTOR",
+            '#idSIButton9, input[type="submit"], button[type="submit"]',
+        )
+        try:
+            active.locator(submit_css).first.click(timeout=10_000)
+        except Exception:
+            pass
 
     # Optional "Stay signed in?" prompt.
     kmsi_css = os.environ.get("AUTH_MSFT_KMSI_SELECTOR", "#idSIButton9, #acceptButton")
@@ -390,14 +451,28 @@ def run_auth(
     storage_path.parent.mkdir(parents=True, exist_ok=True)
 
     started = time.monotonic()
+    interactive_ms = _interactive_timeout_ms(settings)
+    is_sso = spec.auth_kind in _SSO_MODES
     logger.info(
         "auth_runner_start",
         login_url=logger.safe_url(spec.login_url),
         auth_kind=spec.auth_kind,
         username_present=bool(username),
         password_present=bool(password),
-        password_required=spec.auth_kind in _PASSWORD_MODES,
+        app_password_required=spec.auth_kind in _APP_PASSWORD_MODES,
+        interactive_timeout_ms=interactive_ms,
+        headless=settings.browser.headless,
+        mode_supports_interactive=is_sso,
     )
+    if is_sso and settings.browser.headless:
+        logger.warn(
+            "auth_sso_headless",
+            hint=(
+                "SSO detected but HEADLESS=true. Enterprise Entra tenants "
+                "usually require MFA — set HEADLESS=false for the first "
+                "capture so you can complete the prompt interactively."
+            ),
+        )
 
     try:
         with open_session(settings, use_storage_state=False) as sess:
@@ -434,28 +509,36 @@ def run_auth(
                         elapsed_s=time.monotonic() - started,
                     )
                 _locate(sess.page, spec.sso_button_selector).click()
+                # Best-effort credential fill. Any step that fails is
+                # treated as "the user is about to interact with this";
+                # we fall through to _wait_success with the interactive
+                # timeout so MFA / passwordless flows have room to breathe.
                 try:
-                    active.wait_for_selector('input[type="password"]', timeout=30_000)
+                    active.wait_for_selector(
+                        'input[type="password"], input[type="email"]',
+                        timeout=15_000,
+                    )
+                except Exception:
+                    pass
+                try:
                     if spec.username_selector:
                         _locate(active, spec.username_selector).fill(username)
                     else:
                         active.locator(
                             'input[type="email"], input[name*="user" i]'
-                        ).first.fill(username)
-                    if password:
-                        active.locator('input[type="password"]').first.fill(password)
+                        ).first.fill(username, timeout=5_000)
+                except Exception:
+                    pass
+                if password:
+                    try:
+                        active.locator('input[type="password"]').first.fill(
+                            password, timeout=5_000
+                        )
                         btn = active.locator('button[type="submit"], input[type="submit"]')
                         if btn.count() > 0:
-                            btn.first.click()
-                    else:
-                        awaiting_external = True
-                except Exception as exc:
-                    return AuthRunResult(
-                        ok=False,
-                        reason="sso_generic_flow_failed",
-                        elapsed_s=time.monotonic() - started,
-                        diagnostics={"err": str(exc), "nav": diag.to_dict()},
-                    )
+                            btn.first.click(timeout=5_000)
+                    except Exception:
+                        pass
             elif spec.auth_kind == "username_first":
                 second_step = _run_username_first_flow(
                     sess.page, spec, username, password
@@ -502,14 +585,36 @@ def run_auth(
                     },
                 )
 
-            if not _wait_success(active, spec, settings):
+            wait_timeout_ms = interactive_ms if is_sso else 90_000
+            if is_sso:
+                logger.info(
+                    "auth_awaiting_success",
+                    auth_kind=spec.auth_kind,
+                    timeout_ms=wait_timeout_ms,
+                    hint=(
+                        "waiting for post-login URL signal; complete MFA in "
+                        "the visible browser window if prompted"
+                    ),
+                )
+            if not _wait_success(active, spec, settings, timeout_ms=wait_timeout_ms):
                 _dump_failure_artifacts(active, settings, spec)
                 return AuthRunResult(
                     ok=False,
                     reason="success_indicator_not_seen",
                     final_url=active.url,
                     elapsed_s=time.monotonic() - started,
-                    diagnostics={"nav": diag.to_dict()},
+                    diagnostics={
+                        "auth_kind": spec.auth_kind,
+                        "waited_ms": wait_timeout_ms,
+                        "hint": (
+                            "never left login.microsoftonline.com / /login "
+                            "within the timeout. Usual causes: MFA not "
+                            "completed, wrong tenant, conditional-access "
+                            "block. Run again with HEADLESS=false and "
+                            "complete the prompt when it appears."
+                        ),
+                        "nav": diag.to_dict(),
+                    },
                 )
 
             sess.context.storage_state(path=str(storage_path))

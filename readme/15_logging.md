@@ -103,8 +103,14 @@ events when you want to know "why?":
 | `auth_probe_navigated` / `auth_probe_failed` | Whether we reached the login page; failure payload includes redirect chain, popup URLs, console errors, failed requests. |
 | `auth_mode_detected`          | Detected `auth_kind`, all captured selectors, `requires_external_completion`, whether credentials are present. Subsumes the older `auth_form_detected`. |
 | `auth_probe_magic_link_detected` / `auth_probe_otp_detected` / `auth_probe_sso_detected` / `auth_probe_username_first_detected` / `auth_probe_email_only_detected` | Subtype signals for the relevant detection branch. |
+| `classify_auth_gated_shell`   | Anonymous page carried an SSO / sign-in affordance; `requires_auth=True` was set without changing `kind`. |
 | `auth_setup_written`          | Rendered `tests/auth_setup/test_auth_setup.py` action (created / updated). |
-| `auth_runner_start`           | Live login attempt begins; logs `auth_kind` and credential presence. |
+| `auth_runner_start`           | Live login attempt begins; logs `auth_kind`, `app_password_required`, credential presence, `interactive_timeout_ms`, `headless`, `mode_supports_interactive`. |
+| `auth_sso_headless`           | Warning: SSO mode + `HEADLESS=true` — MFA cannot be completed. |
+| `auth_sso_password_input_absent` | Entra page did not render a password input within 15s. Usually passwordless / MFA-first tenant. |
+| `auth_sso_password_requested_but_absent` | Entra asked for a password but `LOGIN_PASSWORD` is not configured; waiting for interactive entry. |
+| `auth_awaiting_success`       | Runner has finished what it can automate; now watching for the post-auth URL signal within `timeout_ms`. Complete MFA at this point if prompted. |
+| `url_skipped_awaiting_auth`   | Protected URL skipped because `requires_auth=True` but no storage state has been captured yet. |
 | `auth_session_captured`       | Login succeeded; `.auth/user.json` written. |
 | `auth_post_capture_invalidated` | Count of non-LOGIN nodes whose status was reset so re-extraction happens under the new session. |
 | `auth_session_awaiting_external` | Runner reached a step it cannot automate (magic link, OTP, MFA). Any cookies set so far have been persisted. |

@@ -42,10 +42,19 @@ Minimum to set:
 BASE_URL=https://app.example.com
 LOGIN_URL=https://app.example.com/login        # optional; auto-detected
 LOGIN_USERNAME=                                 # never commit
-LOGIN_PASSWORD=                                 # never commit
+LOGIN_PASSWORD=                                 # optional for SSO; required for inline-form login
+HEADLESS=false                                  # required for first SSO capture so you can finish MFA
 OLLAMA_NUM_PREDICT=2048                         # critical: 512 truncates feature plans
+AUTH_INTERACTIVE_TIMEOUT_MS=                    # optional ms override; default 300000 headed / 90000 headless
 LOG_LEVEL=info                                  # debug | info | warn | error
 ```
+
+`LOGIN_PASSWORD` is **only** required when the app uses a classic
+inline username+password form. Microsoft/Google/GitHub SSO, magic
+link, OTP, and email-only flows work with `LOGIN_USERNAME` alone —
+the orchestrator fills the password on the IdP page if one is
+configured AND the page asks for it, otherwise it waits for you to
+complete the flow interactively in the visible browser window.
 
 URLs to process come from this priority chain:
 
@@ -174,8 +183,11 @@ the real success URL, real credentials, real MFA flow.
 | `ollama_unreachable` | `docker start autocoder-phi4`; `curl http://localhost:11434/api/tags` |
 | `OllamaError: Could not parse JSON ... Unterminated string` | Raise `OLLAMA_NUM_PREDICT` in `.env` (2048+). The client already retries once with a stricter prompt and recovers fenced / truncated JSON before raising. |
 | `auth_session_not_captured reason=missing_credentials` | Set `LOGIN_USERNAME` in `.env`. |
-| `auth_session_not_captured reason=missing_password_for_password_mode` | Set `LOGIN_PASSWORD` in `.env`. Only form + SSO modes need one; email-only / magic-link / OTP flows do not. |
-| `auth_session_awaiting_external` | Complete the external step (email link, OTP, MFA) once via `HEADLESS=false pytest tests/auth_setup -m auth_setup`. The cookies the runner already collected are still saved, so the follow-up starts warm. |
+| `auth_session_not_captured reason=missing_password_for_password_mode` | Classic username+password app is detected and `LOGIN_PASSWORD` is not set. Set it — SSO modes do NOT trigger this any more. |
+| `auth_sso_headless` warning | You are running an SSO flow with `HEADLESS=true`. Enterprise Entra tenants need MFA, which can't be completed headless. Set `HEADLESS=false` in `.env` and rerun. |
+| `auth_session_not_captured reason=success_indicator_not_seen` | Runner timed out waiting for the page to leave `login.microsoftonline.com` / `/login`. Usually MFA was not completed. Rerun with `HEADLESS=false` and finish the prompt, or raise `AUTH_INTERACTIVE_TIMEOUT_MS`. |
+| `url_skipped_awaiting_auth` | A protected URL was deliberately skipped because no authenticated session exists yet. Complete auth (see `auth_session_*` events) and rerun. |
+| `auth_session_awaiting_external` | Magic-link / OTP flow. Complete the external step once via `HEADLESS=false pytest tests/auth_setup -m auth_setup`. The cookies the runner already collected are still saved, so the follow-up starts warm. |
 | `auth_probe_navigated status=200` then no `auth_mode_detected` | Login page has no recognisable controls. Check the screenshot/HTML in `manifest/logs/nav_timeout_*` or `auth_failure_*`, then either widen the detection in `auth_probe.py` or override the tenant selectors via `AUTH_MSFT_*` env vars. |
 | SSO login fails on custom Entra tenant | Set `AUTH_MSFT_EMAIL_SELECTOR` / `AUTH_MSFT_NEXT_SELECTOR` / `AUTH_MSFT_PASSWORD_SELECTOR` / `AUTH_MSFT_SUBMIT_SELECTOR` / `AUTH_MSFT_KMSI_SELECTOR` in `.env` to match the tenant's markup. |
 | `run_done_with_issues needs_implementation=N` | Some step texts could not be bound or synthesized. Inspect the `steps_incomplete` log lines for the file paths, then `autocoder heal --slug <slug>` or hand-edit the placeholder bodies. |

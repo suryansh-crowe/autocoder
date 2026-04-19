@@ -41,21 +41,27 @@ The top-level event to look for is `stage:auth_first has_login_signal=True`.
 login URL anonymously and classifies it into one of eight modes. The
 first rule to match wins:
 
-| `auth_kind`          | Recognised shape                                                                         | Required env                              |
-|----------------------|------------------------------------------------------------------------------------------|-------------------------------------------|
-| `form`               | Inline `input[type=password]` + username input + submit.                                 | `LOGIN_USERNAME`, `LOGIN_PASSWORD`        |
-| `magic_link`         | Explicit "Send magic link" / "Email me a link" button.                                   | `LOGIN_USERNAME` (+ human to click link)  |
-| `otp_code`           | "Send code" / "Email me a code" button.                                                  | `LOGIN_USERNAME` (+ human to enter code)  |
-| `sso_microsoft`      | "Sign in with Microsoft" / "Continue with Microsoft" button.                             | `LOGIN_USERNAME`, `LOGIN_PASSWORD`        |
-| `sso_generic`        | Google/GitHub/generic-SSO button.                                                        | `LOGIN_USERNAME`, `LOGIN_PASSWORD`        |
-| `username_first`     | Username/email input + "Next"/"Continue" button, no password.                            | `LOGIN_USERNAME` (+ password if 2nd step asks) |
-| `email_only`         | Single `<input type=email>` + submit, no password, no provider button.                   | `LOGIN_USERNAME` (+ human)                |
-| `unknown_auth`       | Login-shaped page that matched none of the above. Best-effort scaffold only.             | depends                                   |
+| `auth_kind`          | Recognised shape                                                                         | Required env                                             |
+|----------------------|------------------------------------------------------------------------------------------|----------------------------------------------------------|
+| `form`               | Inline `input[type=password]` + username input + submit.                                 | `LOGIN_USERNAME`, `LOGIN_PASSWORD`                       |
+| `magic_link`         | Explicit "Send magic link" / "Email me a link" button.                                   | `LOGIN_USERNAME` (+ human to click link)                 |
+| `otp_code`           | "Send code" / "Email me a code" button.                                                  | `LOGIN_USERNAME` (+ human to enter code)                 |
+| `sso_microsoft`      | "Sign in with Microsoft" / "Continue with Microsoft" button.                             | `LOGIN_USERNAME` (password optional; MFA handled interactively) |
+| `sso_generic`        | Google/GitHub/generic-SSO button.                                                        | `LOGIN_USERNAME` (password optional; MFA handled interactively) |
+| `username_first`     | Username/email input + "Next"/"Continue" button, no password.                            | `LOGIN_USERNAME` (+ password if 2nd step asks)           |
+| `email_only`         | Single `<input type=email>` + submit, no password, no provider button.                   | `LOGIN_USERNAME` (+ human)                               |
+| `unknown_auth`       | Login-shaped page that matched none of the above. Best-effort scaffold only.             | depends                                                  |
+
+Only `form` actually requires a password to start the flow. SSO
+modes accept username-only: the runner will fill the password on the
+IdP page if it appears and a password is configured, otherwise it
+hands the window to the user and waits for post-auth navigation.
+Non-password modes carry `notes=…` describing what the user still
+has to do.
 
 The decision is logged as `auth_mode_detected auth_kind=<mode>
 requires_external_completion=<bool>` with every selector strategy we
-picked up. Non-password modes carry `notes=…` describing what the user
-still has to do.
+picked up.
 
 ## In-process auth runner
 
@@ -69,13 +75,17 @@ Dispatch per mode:
 - **`form`** — fill username, fill password, click submit.
 - **`sso_microsoft`** — click the provider button; follow the redirect
   (or the popup) to `login.microsoftonline.com`; fill `loginfmt`, click
-  Next, fill `passwd`, click Sign in, best-effort click the "Stay
-  signed in?" prompt. Selectors can be overridden per tenant via
-  `AUTH_MSFT_EMAIL_SELECTOR` / `AUTH_MSFT_NEXT_SELECTOR` /
-  `AUTH_MSFT_PASSWORD_SELECTOR` / `AUTH_MSFT_SUBMIT_SELECTOR` /
-  `AUTH_MSFT_KMSI_SELECTOR`.
+  Next, then *best-effort* fill `passwd` if (a) the password input
+  appears within 15s and (b) `LOGIN_PASSWORD` is configured. If either
+  condition fails, the runner stops typing and hands the window to
+  the user — MFA prompts, passkey challenges, number-match screens,
+  and conditional-access prompts all land here. Selectors can be
+  overridden per tenant via `AUTH_MSFT_EMAIL_SELECTOR` /
+  `AUTH_MSFT_NEXT_SELECTOR` / `AUTH_MSFT_PASSWORD_SELECTOR` /
+  `AUTH_MSFT_SUBMIT_SELECTOR` / `AUTH_MSFT_KMSI_SELECTOR`.
 - **`sso_generic`** — click the button; if a password input appears at
-  the destination, fill and submit.
+  the destination **and** `LOGIN_PASSWORD` is set, fill and submit.
+  Otherwise wait for interactive completion.
 - **`username_first`** — fill username, click Next, then wait up to
   30 s for a password input. If it appears and `LOGIN_PASSWORD` is
   set, fill + submit. If the next screen is an IdP redirect or a code
@@ -86,8 +96,33 @@ Dispatch per mode:
   `storage_state` so the user's manual follow-up step starts warm.
 
 Credential gating is mode-aware (`_credentials` in `auth_runner.py`):
-a password is **only** required for `form` / `sso_*`. Username-only
-modes accept just `LOGIN_USERNAME`.
+a password is **only** required for `form`. SSO and every other mode
+accept username-only — the runner will use a password if one is
+configured, otherwise it waits for the user to finish the flow.
+
+## Interactive completion budget
+
+`_interactive_timeout_ms(settings)` decides how long `_wait_success`
+will watch the browser for the post-auth URL signal:
+
+| Condition                                     | Default budget |
+|-----------------------------------------------|----------------|
+| `HEADLESS=false` (typical for SSO + MFA)       | 300 s          |
+| `HEADLESS=true`                                | 90 s           |
+| Override                                       | `AUTH_INTERACTIVE_TIMEOUT_MS` env var (ms) |
+
+When `HEADLESS=true` is combined with an SSO mode, the runner emits
+`auth_sso_headless` as a warning: enterprise tenants almost always
+require MFA, and a headless run has no way to satisfy it. The run
+still proceeds in case the tenant relies on browser SSO cookies that
+happen to be present, but expect `success_indicator_not_seen` if it
+doesn't pan out.
+
+`_wait_success` only declares success when the page has left
+`login.microsoftonline.com` **and** is no longer on the app's
+`/login` path. Storage state is written only after that check
+passes — so a session that stalls on MFA never masquerades as a
+captured session.
 
 Outcomes:
 
@@ -220,10 +255,16 @@ auth_probe_username_first_detected
 auth_probe_email_only_detected
 auth_setup_written                # template rendered
 auth_runner_start                 # live login attempt begins
-auth_session_captured             # storage saved — 
+auth_sso_headless                 # SSO detected + HEADLESS=true warning
+auth_sso_password_input_absent    # Entra did not show a password input — passwordless/MFA
+auth_sso_password_requested_but_absent  # Entra asked for a password but none is configured
+auth_awaiting_success             # runner is now waiting for MFA / final navigation
+auth_session_captured             # storage saved — success
 auth_post_capture_invalidated     # stale PUBLIC nodes marked for re-extract
 auth_session_awaiting_external    # flow paused for manual step
 auth_session_not_captured         # missing creds / unreachable / failed
 auth_escalation_retry             # extraction hit login — retry under session
 auth_failure_artifacts            # screenshot + HTML written on runner failure
+classify_auth_gated_shell         # anonymous page had a visible SSO affordance
+url_skipped_awaiting_auth         # protected URL skipped — no session yet
 ```
