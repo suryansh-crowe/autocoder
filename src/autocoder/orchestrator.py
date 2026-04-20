@@ -1285,6 +1285,18 @@ def _process_url(
         scenarios=len(feature_plan.scenarios),
         background_steps=len(feature_plan.background),
     )
+    # Readability log — enumerate each generated scenario inline so a
+    # human tailing the run can see at a glance what's being tested
+    # for this URL, without having to open the .feature file.
+    for i, scn in enumerate(feature_plan.scenarios, start=1):
+        logger.info(
+            "scenario_planned",
+            slug=node.slug,
+            n=f"{i}/{len(feature_plan.scenarios)}",
+            tier=scn.tier,
+            steps=len(scn.steps),
+            title=scn.title,
+        )
 
     steps_path = settings.paths.steps_dir / f"test_{node.slug}.py"
     rel_feature = feature_path.relative_to(settings.paths.features_dir)

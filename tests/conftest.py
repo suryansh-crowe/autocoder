@@ -405,15 +405,14 @@ def pytest_sessionfinish(session: "pytest.Session", exitstatus: int) -> None:
 
     try:
         from autocoder.config import load_settings
-        from autocoder.report import build_report, render_html_report
+        from autocoder.report import build_report, write_html_reports
     except Exception:
         return
 
     try:
         settings = load_settings()
         data = build_report(settings, run_pytest=False)
-        html_path = manifest_dir / "report.html"
-        html_path.write_text(render_html_report(data), encoding="utf-8")
+        latest, timestamped = write_html_reports(settings, data)
     except Exception as exc:  # noqa: BLE001
         reporter = session.config.pluginmanager.get_plugin("terminalreporter")
         if reporter is not None:
@@ -423,7 +422,8 @@ def pytest_sessionfinish(session: "pytest.Session", exitstatus: int) -> None:
     reporter = session.config.pluginmanager.get_plugin("terminalreporter")
     if reporter is not None:
         reporter.write_line("")
+        ts_note = f" (archived {timestamped})" if timestamped else ""
         reporter.write_line(
-            f"[autocoder-report] {len(touched)} slug(s) updated → {html_path}",
+            f"[autocoder-report] {len(touched)} slug(s) updated → {latest}{ts_note}",
             cyan=True,
         )

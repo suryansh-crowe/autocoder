@@ -497,14 +497,16 @@ def report(
     )
     data = build_report(settings, run_pytest=run_pytest_flag)
     if html_path is not None:
-        from autocoder.report import render_html_report
-        html_path.parent.mkdir(parents=True, exist_ok=True)
-        html_path.write_text(render_html_report(data), encoding="utf-8")
-        logger.ok("report_html_written", path=str(html_path))
-        _console.print(f"[cyan]HTML report:[/] {html_path}")
+        from autocoder.report import write_html_reports
+        latest, written = write_html_reports(
+            settings, data, explicit_path=html_path
+        )
+        _console.print(
+            f"[cyan]HTML report:[/] {written}  [dim](latest → {latest})[/]"
+        )
         if open_html:
             import webbrowser
-            webbrowser.open(html_path.resolve().as_uri())
+            webbrowser.open(written.resolve().as_uri())
     if as_json:
         import json as _json
         payload = {

@@ -22,7 +22,14 @@ def _need(env: str) -> str:
 
 
 def _skip_if_session_captured() -> None:
-    """Skip when `.auth/user.json` already exists and is non-empty."""
+    """Skip the test when `.auth/user.json` already exists and is non-empty.
+
+    `autocoder run` and the conftest `_ensure_auth_session` fixture both
+    capture storage_state in-process. Re-running this test after that
+    is redundant and fails on SSO/passwordless tenants where some env
+    vars (e.g. LOGIN_PASSWORD) are deliberately unset. Delete
+    `.auth/user.json` to force a fresh capture.
+    """
     if _STORAGE_STATE.exists() and _STORAGE_STATE.stat().st_size > 0:
         pytest.skip(
             f"storage_state already captured at {_STORAGE_STATE} — "

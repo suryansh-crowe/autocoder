@@ -294,6 +294,74 @@ def build_report(settings: Settings, *, run_pytest: bool) -> ReportData:
     )
 
 
+def write_html_reports(
+    settings: Settings,
+    data: ReportData,
+    *,
+    explicit_path: Path | None = None,
+) -> tuple[Path, Path | None]:
+    """Write the HTML report. Always keeps two copies on disk:
+
+    * ``manifest/reports/report-<YYYYMMDD-HHMMSS>.html`` — timestamped,
+      preserved across runs so you can compare historical runs.
+    * ``manifest/report.html`` — well-known "latest" path, same
+      content as the newest timestamped file, overwritten every run.
+
+    When ``explicit_path`` is given (``autocoder report --html <path>``),
+    that path is written instead of the timestamped file; the latest
+    symlink is still updated so tooling pointing at
+    ``manifest/report.html`` keeps working.
+
+    Returns ``(latest_path, timestamped_path_or_None)``.
+    """
+    latest = settings.paths.manifest_dir / "report.html"
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    reports_dir = settings.paths.manifest_dir / "reports"
+
+    # Build a list of prior timestamped reports (relative hrefs,
+    # newest first) that the new HTML can link to. Empty on the
+    # first run.
+    prior: list[tuple[str, str]] = []
+    if reports_dir.is_dir():
+        for p in sorted(
+            reports_dir.glob("report-*.html"),
+            key=lambda q: q.stat().st_mtime,
+            reverse=True,
+        )[:25]:
+            label = p.stem  # e.g. ``report-20260420-221944``
+            prior.append((label, f"reports/{p.name}"))
+
+    if explicit_path is not None:
+        html = render_html_report(
+            data, report_id=explicit_path.stem, prior_reports=prior
+        )
+        explicit_path.parent.mkdir(parents=True, exist_ok=True)
+        explicit_path.write_text(html, encoding="utf-8")
+        latest.write_text(html, encoding="utf-8")
+        logger.ok(
+            "report_html_written",
+            latest=str(latest),
+            path=str(explicit_path),
+            source="explicit",
+        )
+        return latest, explicit_path
+
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    timestamped = reports_dir / f"report-{stamp}.html"
+    html = render_html_report(data, report_id=timestamped.stem, prior_reports=prior)
+    timestamped.write_text(html, encoding="utf-8")
+    latest.write_text(html, encoding="utf-8")
+    logger.ok(
+        "report_html_written",
+        latest=str(latest),
+        timestamped=str(timestamped),
+        source="auto",
+        prior_count=len(prior),
+    )
+    return latest, timestamped
+
+
 def _load_defects(settings: Settings) -> list[DefectRow]:
     """Read ``manifest/runs/defects.json`` written by the heal engine."""
     path = settings.paths.manifest_dir / "runs" / "defects.json"
@@ -408,9 +476,25 @@ tbody tr:hover { background: rgba(56, 189, 248, 0.05); }
 """
 
 
-def render_html_report(data: ReportData) -> str:
-    """Return a standalone HTML dashboard for :class:`ReportData`."""
+def render_html_report(
+    data: ReportData,
+    *,
+    report_id: str | None = None,
+    prior_reports: list[tuple[str, str]] | None = None,
+) -> str:
+    """Return a standalone HTML dashboard for :class:`ReportData`.
+
+    ``report_id`` is rendered in the header so you can correlate an
+    open tab with its on-disk filename (e.g. ``report-20260420-221944``).
+    ``prior_reports`` is a list of ``(label, relative_href)`` pairs
+    rendered at the bottom so a reader can jump between runs.
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    header_id = (
+        f" · <code style='color:var(--accent)'>{_html.escape(report_id)}</code>"
+        if report_id
+        else ""
+    )
     pct = (
         f"{100.0 * data.total_passed / data.total_scenarios:.1f}%"
         if data.total_scenarios
@@ -498,7 +582,7 @@ def render_html_report(data: ReportData) -> str:
 </head>
 <body>
 <h1>autocoder — end-to-end test report</h1>
-<div class="subtitle">Generated {now} · {len(data.slugs)} URLs · {data.total_scenarios} scenarios · pass rate {pct}</div>
+<div class="subtitle">Generated {now}{header_id} · {len(data.slugs)} URLs · {data.total_scenarios} scenarios · pass rate {pct}</div>
 
 <section class="cards">
   <div class="card"><div class="k">URLs</div><div class="v">{len(data.slugs)}</div></div>
@@ -525,6 +609,31 @@ def render_html_report(data: ReportData) -> str:
   </tbody>
 </table>
 {defects_section}
+{_render_prior_reports_section(prior_reports)}
 </body>
 </html>
+"""
+
+
+def _render_prior_reports_section(
+    prior_reports: list[tuple[str, str]] | None,
+) -> str:
+    if not prior_reports:
+        return ""
+    items = "\n".join(
+        f'  <li><a href="{_html.escape(href)}">{_html.escape(label)}</a></li>'
+        for label, href in prior_reports
+    )
+    return f"""
+<h2>Prior reports</h2>
+<div class="subtitle">Jump to a previous run's report. Newest first.</div>
+<ul class="prior">
+{items}
+</ul>
+<style>
+.prior {{ margin: 0 0 16px; padding: 0 0 0 20px; font-family: ui-monospace, monospace; font-size: 13px; }}
+.prior li {{ margin: 2px 0; }}
+.prior a {{ color: var(--accent); text-decoration: none; }}
+.prior a:hover {{ text-decoration: underline; }}
+</style>
 """
