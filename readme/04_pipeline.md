@@ -4,16 +4,26 @@ There are two entry points:
 
 | Command | What it runs |
 |---------|-------------|
-| `autocoder generate` | Stages 1-8 only. Produces files on disk. Does **not** invoke pytest. |
-| `autocoder run` | Stages 1-8 + pytest + heal-from-pytest + pytest loop, up to `--max-heal-attempts` (default 3) passes. The canonical "give me tests that actually pass" entry point. |
+| `autocoder generate` | Stages 1-10 only. Produces files on disk. Does **not** invoke pytest. |
+| `autocoder run` | Stages 1-10 + pytest + heal-from-pytest + pytest loop, up to `--max-heal-attempts` (default 3) passes. The canonical "give me tests that actually pass" entry point. |
 
-Both share the nine generation stages below. `autocoder run` adds a
+Both share the generation stages below. `autocoder run` adds a
 verification phase described at the end of this doc.
 
-The orchestrator runs nine stages per generation invocation.
-Stages 4 and 6 are the only ones that talk to the LLM. Stage 2 (auth)
-actually performs the login in-process. Everything else is
-deterministic.
+The orchestrator runs the **three-prompt per-page sequence** on top
+of the classification + auth + extraction phases. Stages 4, 6 and 8
+are the LLM calls; everything else is deterministic. Stage 2 (auth)
+actually performs the login in-process.
+
+The three LLM calls per page, in order:
+
+1. **Prompt 1 — POM plan** (stage 4): pick method names + actions for
+   the extracted controls.
+2. **Prompt 2 — Feature plan** (stage 6): translate the control JSON
+   into per-control-type Gherkin scenarios across the requested tiers.
+3. **Prompt 3 — Playwright codegen** (stage 8): turn the feature plan
+   into a pure-Playwright pytest script whose body is a list of
+   statements that call the POM fixture or Playwright primitives.
 
 ```
                    you provide URLs
@@ -123,66 +133,95 @@ deterministic.
                           │
                           ▼
 ┌────────────────────────────────────────────────────────────────┐
-│ 6. FEATURE PLAN  autocoder/llm/  (2nd of 2 LLM calls)          │
+│ 6. FEATURE PLAN  autocoder/llm/  (2nd LLM call — Prompt 2)     │
 │   ─ input       extraction summary + POM method names + tiers  │
 │   ─ tiers       smoke | sanity | regression | happy | edge |   │
 │                 validation | navigation | auth | rbac | e2e    │
+│   ─ per-control scenarios (textbox → fill + valid/invalid,     │
+│     button → click + consequence, checkbox → toggle +          │
+│     dependent, form → submit + validation, link/tab → URL nav) │
 │   ─ validator   each step.pom_method must exist; close-match   │
 │                 rebind via difflib before nulling; dedupe      │
 │                 scenarios by title                             │
 │   ─ fallback    on OllamaError we return a minimal FeaturePlan │
-│                 (POM + steps still render) instead of failing  │
-│                 the URL                                        │
+│                 so the POM still renders and the user can      │
+│                 rerun once the LLM is healthy                  │
 │   ─ output      FeaturePlan{feature, background, scenarios[]}  │
 │   ─ tokens      ~350 in / ~180 out                             │
 └────────────────────────────────────────────────────────────────┘
                           │
                           ▼
 ┌────────────────────────────────────────────────────────────────┐
-│ 7. RENDER FEATURE + STEPS    autocoder/generate/{feature,steps}│
+│ 7. RENDER FEATURE FILE    autocoder/generate/feature.py        │
 │   feature.py    → tests/features/<slug>.feature                │
-│                   (Gherkin, tier→tag mapping)                  │
-│   steps.py      → tests/steps/test_<slug>.py                   │
-│                   (pytest-bdd; one decorator per unique step;  │
-│                    body = pom_method call OR synthesized       │
-│                    Playwright call for navigation/assertion/   │
-│                    negation patterns OR NotImplementedError    │
-│                    when neither fits)                          │
-│   ─ quality gate: count NotImplementedError in the rendered    │
-│     file. > 0 → node.status = NEEDS_IMPLEMENTATION; the run    │
-│     summary surfaces it via run_done_with_issues               │
+│                   (Gherkin, tier→tag mapping; kept as an       │
+│                    intermediate artifact the user can review)  │
 │   ─ tokens      0                                              │
 └────────────────────────────────────────────────────────────────┘
                           │
                           ▼
 ┌────────────────────────────────────────────────────────────────┐
-│ 8. PERSIST     autocoder/registry/store.py                     │
+│ 8. PLAYWRIGHT CODEGEN  autocoder/llm/codegen.py (3rd LLM call) │
+│   ─ input       FeaturePlan + POMPlan + element catalog        │
+│   ─ system      PLAYWRIGHT_CODEGEN_SYSTEM (per-control test    │
+│                 rules, pom.locate/expect/page primitives, one  │
+│                 statement per list entry, navigate() first)    │
+│   ─ validator   generate/playwright_script.py re-checks every  │
+│                 statement against the POM method names and the │
+│                 SELECTORS catalogue; unsafe statements become  │
+│                 NotImplementedError stubs so the heal stage    │
+│                 can revise them                                │
+│   ─ fallback    on OllamaError a one-statement-per-scenario    │
+│                 placeholder plan is used so the file still     │
+│                 renders and is picked up by the heal stage     │
+│   ─ output      PlaywrightScriptPlan{url, pom_*, tests[]}      │
+│   ─ tokens      ~500 in / ~300 out                             │
+└────────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌────────────────────────────────────────────────────────────────┐
+│ 9. RENDER PLAYWRIGHT SCRIPT  autocoder/generate/playwright_    │
+│                              script.py                         │
+│   ─ writes      tests/playwright/test_<slug>.py                │
+│   ─ imports     tests.pages.<slug>_page.<SlugPage> + pytest +  │
+│                 playwright.sync_api.expect                     │
+│   ─ one pytest test function per scenario, decorated with      │
+│     @pytest.mark.<tier> (+ extra tags)                         │
+│   ─ quality gate: count NotImplementedError stubs in the       │
+│     rendered file. > 0 → node.status = NEEDS_IMPLEMENTATION    │
+│   ─ tokens      0                                              │
+└────────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌────────────────────────────────────────────────────────────────┐
+│ 10. PERSIST    autocoder/registry/store.py                     │
 │   ─ status      pending → extracted → pom_ready →              │
-│                 feature_ready → steps_ready →                  │
+│                 feature_ready →                                │
 │                 (complete | needs_implementation | failed)     │
 │   ─ writes      registry.yaml + manifest/logs/<ts>-<cmd>.log   │
 └────────────────────────────────────────────────────────────────┘
                           │
                           ▼
-                   pytest-bdd suite
-              ready to execute
+                pure-Playwright pytest suite
+                ready to execute
 ```
 
 ## Stage outputs at a glance
 
-| Stage          | Lives in                            | LLM tokens         | Output |
-|----------------|-------------------------------------|--------------------|--------|
-| 1. Intake      | `autocoder/intake/`                 | 0                  | `URLNode` rows in `registry.yaml` |
-| 1b. Homepage   | `autocoder/orchestrator.py`         | 0                  | Extra login signal when `base_url` is gated |
-| 2. Auth-first  | `autocoder/extract/auth_probe.py` + `auth_runner.py` + `generate/auth_setup.py` | 0 | `tests/auth_setup/test_auth_setup.py` + `.auth/user.json` + populated `AuthSpec` |
-| 3. Extract     | `autocoder/extract/inspector.py`    | 0                  | `manifest/extractions/<slug>.json` (under session when auth is ready) |
-| 4. POM plan    | `autocoder/llm/plans.py`            | ~400 in / ~120 out | `manifest/plans/*.pom.<fp>.json` |
-| 5. POM render  | `autocoder/generate/pom.py`         | 0                  | `tests/pages/<slug>_page.py` |
-| 6. Feature plan| `autocoder/llm/plans.py`            | ~350 in / ~180 out | `manifest/plans/*.feature.<tiers>.<fp>.json` |
-| 7a. Feature    | `autocoder/generate/feature.py`     | 0                  | `tests/features/<slug>.feature` |
-| 7b. Steps      | `autocoder/generate/steps.py`       | 0                  | `tests/steps/test_<slug>.py` (+ quality gate) |
-| 8. Persist     | `autocoder/registry/`               | 0                  | `registry.yaml` + `manifest/logs/<ts>-<cmd>.log` |
-| **9. Heal (optional)** | `autocoder/heal/`           | ~250 in / ~30 out per stub; ~400 / ~80 per failure | Step bodies in `tests/steps/test_<slug>.py` (stub fill or runtime-failure revision) |
+| Stage                   | Lives in                            | LLM tokens         | Output |
+|-------------------------|-------------------------------------|--------------------|--------|
+| 1. Intake               | `autocoder/intake/`                 | 0                  | `URLNode` rows in `registry.yaml` |
+| 1b. Homepage probe      | `autocoder/orchestrator.py`         | 0                  | Extra login signal when `base_url` is gated |
+| 2. Auth-first           | `autocoder/extract/auth_probe.py` + `auth_runner.py` + `generate/auth_setup.py` | 0 | `tests/auth_setup/test_auth_setup.py` + `.auth/user.json` + populated `AuthSpec` |
+| 3. Extract              | `autocoder/extract/inspector.py`    | 0                  | `manifest/extractions/<slug>.json` (the controls JSON consumed by prompts 2 + 3) |
+| 4. Prompt 1 — POM plan  | `autocoder/llm/plans.py`            | ~400 in / ~120 out | `manifest/plans/*.pom.<fp>.json` |
+| 5. POM render           | `autocoder/generate/pom.py`         | 0                  | `tests/pages/<slug>_page.py` |
+| 6. Prompt 2 — Feature plan | `autocoder/llm/plans.py`         | ~350 in / ~180 out | `manifest/plans/*.feature.<tiers>.<fp>.json` |
+| 7. Feature render       | `autocoder/generate/feature.py`     | 0                  | `tests/features/<slug>.feature` |
+| 8. Prompt 3 — Playwright codegen | `autocoder/llm/codegen.py` | ~500 in / ~300 out | `manifest/plans/*.playwright.<fp>.<featfp>.json` |
+| 9. Playwright render    | `autocoder/generate/playwright_script.py` | 0            | `tests/playwright/test_<slug>.py` (+ quality gate) |
+| 10. Persist             | `autocoder/registry/`               | 0                  | `registry.yaml` + `manifest/logs/<ts>-<cmd>.log` |
+| **11. Heal (optional)** | `autocoder/heal/`                   | ~300 / ~80 per stub or failure | Test function bodies in `tests/playwright/test_<slug>.py` (stub fill or runtime-failure revision at the function level) |
 
 ## Verification + heal loop (`autocoder run` only)
 
@@ -193,17 +232,17 @@ timing issues, DOM drift, assertion mismatches — get healed.
 
 ```
                     for every slug with status in (complete, needs_implementation)
-                    and a tests/steps/test_<slug>.py file on disk:
+                    and a tests/playwright/test_<slug>.py file on disk:
                              │
                              ▼
 ┌────────────────────────────────────────────────────────────────┐
-│ 9. VERIFY      autocoder/orchestrator.py:_run_pytest_for_slug  │
-│   ─ invokes `pytest tests/steps/test_<slug>.py` with a JUnit   │
-│     report at manifest/runs/<slug>.xml                         │
+│ 11. VERIFY     autocoder/orchestrator.py:_run_pytest_for_slug  │
+│   ─ invokes `pytest tests/playwright/test_<slug>.py` with a    │
+│     JUnit report at manifest/runs/<slug>.xml                   │
 │   ─ parses failures via heal/pytest_failures.py                │
 │   ─ captures failure_class (timeout, disabled, intercepted,    │
 │     wrong_kind, locator_not_found, not_visible, not_attached,  │
-│     other) for each failing step                               │
+│     other) for each failing test                               │
 │   ─ emits pytest_outcome slug=X passed=T/F failures=N          │
 └────────────────────────────────────────────────────────────────┘
                              │
@@ -212,17 +251,17 @@ timing issues, DOM drift, assertion mismatches — get healed.
                                                     │
                                                     ▼
 ┌────────────────────────────────────────────────────────────────┐
-│ 10. HEAL       autocoder/heal/runner.py  (from_pytest=True)    │
-│   ─ per failing slug: read the JUnit XML, build a HEAL prompt  │
-│     with failure_class + step text + current body + Playwright │
-│     error message                                              │
-│   ─ ONE LLM call per failing step, json_mode=True              │
-│   ─ validator enforces: ≤5 stmts, allowed node types,          │
+│ 12. HEAL       autocoder/heal/runner.py  (from_pytest=True)    │
+│   ─ per failing test: read the JUnit XML, build a FAILURE_HEAL │
+│     prompt with failure_class + scenario title + current body  │
+│     + Playwright error message                                 │
+│   ─ ONE LLM call per failing test function, json_mode=True     │
+│   ─ validator enforces: ≤20 stmts, allowed node types,         │
 │     every fixture method must exist in the POM plan,           │
 │     every `locate('id')` must reference a real SELECTORS key   │
-│   ─ applier line-replaces the body and re-parses the file;     │
-│     rolls back if the rewrite no longer parses                 │
-│   ─ suggestions are cached by (slug, step_text, fingerprint,   │
+│   ─ applier replaces the entire function body and re-parses    │
+│     the file; rolls back if the rewrite no longer parses       │
+│   ─ suggestions cached by (slug, function, fingerprint,        │
 │     failure_class) so reruns of the same failure cost 0 tokens │
 │   ─ emits run_heal_slug_done slug=X attempt=N applied=K        │
 │   if no body changed this attempt → exit loop early            │

@@ -1,21 +1,27 @@
 """End-to-end pipeline that ties every stage together.
 
-Workflow (matches the user-defined flow):
+Workflow (matches the user-defined 3-prompt per-page flow):
 
-1. **Intake**       — classify URLs, persist nodes to the registry.
-2. **Auth-first**   — if any URL needs auth (or any URL is the login
-                      itself), build the auth setup before extracting
-                      protected pages.
-3. **Extraction**   — visit each URL in dependency order using the
-                      stored ``storage_state`` when applicable.
-4. **POM plan**     — single LLM call per URL, JSON output, validated
-                      against the catalog.
-5. **POM render**   — deterministic template -> ``tests/pages/<slug>_page.py``.
-6. **Feature plan** — single LLM call per URL covering the requested
-                      tiers, validated against POM method names.
-7. **Feature render** -> ``tests/features/<slug>.feature``.
-8. **Steps render** -> ``tests/steps/test_<slug>.py`` (zero LLM tokens).
-9. **Persist**      — registry status updates + run log entry.
+1. **Intake**          — classify URLs, persist nodes to the registry.
+2. **Auth-first**      — if any URL needs auth (or any URL is the login
+                          itself), build the auth setup before extracting
+                          protected pages.
+3. **Extraction**      — visit each URL in dependency order using the
+                          stored ``storage_state`` when applicable.
+                          Produces the controls JSON consumed by the
+                          feature prompt.
+4. **POM plan**        — 1st LLM call: page object plan, JSON output,
+                          validated against the catalog.
+5. **POM render**      — deterministic template -> ``tests/pages/<slug>_page.py``.
+6. **Feature plan**    — 2nd LLM call: per-control-type Gherkin
+                          scenarios across the requested tiers.
+7. **Feature render**  -> ``tests/features/<slug>.feature``.
+8. **Playwright plan** — 3rd LLM call: converts the feature plan +
+                          POM into a list of pytest test functions
+                          whose bodies are pure Playwright statements.
+9. **Playwright render** -> ``tests/playwright/test_<slug>.py``.
+10. **Heal loop** (on failures) — LLM rewrites failing test function
+                          bodies at the statement list level.
 
 Reruns reuse cached extractions and plans by fingerprint, so unchanged
 pages cost nothing.
@@ -43,10 +49,11 @@ from contextlib import contextmanager, nullcontext
 from autocoder.extract.inspector import extract_page
 from autocoder.generate.auth_setup import render_auth_setup
 from autocoder.generate.feature import render_feature
+from autocoder.generate.playwright_script import render_playwright_script
 from autocoder.generate.pom import render_pom
-from autocoder.generate.steps import render_steps
 from autocoder.intake.classifier import classify_urls, looks_like_login_url
 from autocoder.intake.graph import build_dependency_graph, topological_order
+from autocoder.llm.codegen import generate_playwright_script_plan
 from autocoder.llm.factory import get_llm_client
 from autocoder.llm.ollama_client import OllamaClient
 from autocoder.llm.plans import generate_feature_plan, generate_pom_plan
@@ -80,7 +87,7 @@ class StageResult:
     extraction: PageExtraction | None
     pom_path: Path | None
     feature_path: Path | None
-    steps_path: Path | None
+    playwright_path: Path | None
     issues: list[str]
 
 
@@ -256,7 +263,7 @@ def run_generate(settings: Settings, opts: GenerateOptions) -> list[StageResult]
                         extraction=None,
                         pom_path=Path(node.pom_path) if node.pom_path else None,
                         feature_path=Path(node.feature_path) if node.feature_path else None,
-                        steps_path=Path(node.steps_path) if node.steps_path else None,
+                        playwright_path=Path(node.playwright_path) if node.playwright_path else None,
                         issues=[f"{type(exc).__name__}: {exc!s}"],
                     ))
                     continue
@@ -269,7 +276,7 @@ def run_generate(settings: Settings, opts: GenerateOptions) -> list[StageResult]
                     status=result.node.status.value,
                     pom=bool(result.pom_path),
                     feature=bool(result.feature_path),
-                    steps=bool(result.steps_path),
+                    playwright=bool(result.playwright_path),
                     issues=len(result.issues),
                 )
         finally:
@@ -290,8 +297,9 @@ def run_generate(settings: Settings, opts: GenerateOptions) -> list[StageResult]
             failed=failed,
             duration=duration,
             hint=(
-                "Generation finished, but some URLs produced placeholder steps or "
-                "failed outright. See steps_incomplete / url_failed entries above."
+                "Generation finished, but some URLs produced placeholder test "
+                "bodies or failed outright. See playwright_incomplete / "
+                "url_failed entries above."
             ),
         )
     else:
@@ -340,7 +348,7 @@ def _run_pytest_for_slug(slug: str, settings: Settings) -> PytestOutcome:
     """Run pytest for a single slug's test module and return pass/fail."""
     from autocoder.heal.pytest_failures import run_pytest_capture
 
-    test_file = settings.paths.steps_dir / f"test_{slug}.py"
+    test_file = settings.paths.playwright_dir / f"test_{slug}.py"
     junit_dir = settings.paths.manifest_dir / "runs"
     junit_dir.mkdir(parents=True, exist_ok=True)
     junit_path = junit_dir / f"{slug}.xml"
@@ -384,16 +392,17 @@ def run_full_cycle(
 
     Flow
     ----
-    1. :func:`run_generate` produces POM / feature / steps files.
+    1. :func:`run_generate` produces POM / feature / playwright files.
     2. For every slug whose generation ended in ``COMPLETE`` or
-       ``NEEDS_IMPLEMENTATION`` and has a ``tests/steps/test_<slug>.py``
+       ``NEEDS_IMPLEMENTATION`` and has a ``tests/playwright/test_<slug>.py``
        file, pytest is invoked against that single file and the JUnit
        XML is stored under ``manifest/runs/<slug>.xml``.
     3. While any slug is failing and ``heal_attempts[slug] <
        max_heal_attempts``, ``heal_steps(..., from_pytest=True)`` is
        called for each failing slug; the runtime errors drive
-       LLM-generated patches (validated and written into the step
-       files). Pytest re-runs for just those slugs.
+       LLM-generated patches (validated and written into the Playwright
+       test files at the test-function level). Pytest re-runs for just
+       those slugs.
     4. The loop stops when every slug passes OR no heal attempt
        produced any change (no point burning the remaining budget).
     5. The registry is updated: passing slugs go to ``VERIFIED``,
@@ -407,11 +416,11 @@ def run_full_cycle(
     store = RegistryStore(settings.paths.registry_path)
     registry = store.load()
 
-    # Build the verification set: slugs with a steps file, reached at
-    # least ``COMPLETE``, and have a regenerated test on disk.
+    # Build the verification set: slugs with a Playwright test file,
+    # reached at least ``COMPLETE``, and have a regenerated test on disk.
     verifiable: list[str] = []
     for r in gen_results:
-        if r.node.status in (Status.COMPLETE, Status.NEEDS_IMPLEMENTATION) and r.steps_path:
+        if r.node.status in (Status.COMPLETE, Status.NEEDS_IMPLEMENTATION) and r.playwright_path:
             verifiable.append(r.node.slug)
 
     logger.stage(
@@ -1014,7 +1023,7 @@ def _process_url(
             extraction=None,
             pom_path=Path(node.pom_path) if node.pom_path else None,
             feature_path=Path(node.feature_path) if node.feature_path else None,
-            steps_path=Path(node.steps_path) if node.steps_path else None,
+            playwright_path=Path(node.playwright_path) if node.playwright_path else None,
             issues=["skipped: awaiting authenticated session"],
         )
 
@@ -1044,7 +1053,7 @@ def _process_url(
     if extraction is None:
         node.status = Status.FAILED
         logger.error("url_failed", slug=node.slug, stage="extract")
-        return StageResult(node=node, extraction=None, pom_path=None, feature_path=None, steps_path=None, issues=["extraction failed"])
+        return StageResult(node=node, extraction=None, pom_path=None, feature_path=None, playwright_path=None, issues=["extraction failed"])
 
     extraction.fingerprint = fingerprint_extraction(extraction)
     extraction_path = settings.paths.extractions_dir / f"{node.slug}.json"
@@ -1102,13 +1111,13 @@ def _process_url(
             extraction=extraction,
             pom_path=Path(node.pom_path) if node.pom_path else None,
             feature_path=Path(node.feature_path) if node.feature_path else None,
-            steps_path=Path(node.steps_path) if node.steps_path else None,
+            playwright_path=Path(node.playwright_path) if node.playwright_path else None,
             issues=issues,
         )
 
     if client is None:
         logger.warn("llm_skipped", slug=node.slug, reason="--skip-llm flag set")
-        return StageResult(node=node, extraction=extraction, pom_path=None, feature_path=None, steps_path=None, issues=issues)
+        return StageResult(node=node, extraction=extraction, pom_path=None, feature_path=None, playwright_path=None, issues=issues)
 
     # Empty extraction guard. An authenticated SPA that has not
     # hydrated will hand us zero interactive elements — if we still
@@ -1145,7 +1154,7 @@ def _process_url(
             extraction=extraction,
             pom_path=None,
             feature_path=None,
-            steps_path=None,
+            playwright_path=None,
             issues=issues + ["skipped: extraction captured 0 interactive elements"],
         )
 
@@ -1202,31 +1211,45 @@ def _process_url(
         background_steps=len(feature_plan.background),
     )
 
-    steps_path = settings.paths.steps_dir / f"test_{node.slug}.py"
-    rel_feature = feature_path.relative_to(settings.paths.features_dir)
-    existed = steps_path.exists()
-    rendered_steps = render_steps(
-        feature_title=feature_plan.feature,
-        feature_path=str(rel_feature).replace("\\", "/"),
+    pom_module = f"{node.slug}_page"
+
+    logger.stage(
+        "playwright_plan",
+        slug=node.slug,
+        fixture=fixture_name,
+        scenarios=len(feature_plan.scenarios),
+    )
+    script_plan = generate_playwright_script_plan(
+        extraction,
         feature_plan=feature_plan,
         pom_plan=pom_plan,
-        pom_module=f"{node.slug}_page",
+        pom_module=pom_module,
+        client=client,
+        cache_dir=settings.paths.plans_dir,
+        force=opts.force,
+    )
+
+    playwright_path = settings.paths.playwright_dir / f"test_{node.slug}.py"
+    existed = playwright_path.exists()
+    rendered_script, placeholder_count = render_playwright_script(
+        script_plan,
+        feature_title=feature_plan.feature,
+        pom_method_names={m.name for m in pom_plan.methods},
         elements=list(extraction.elements),
     )
-    steps_path.write_text(rendered_steps, encoding="utf-8")
-    node.steps_path = str(steps_path)
+    playwright_path.write_text(rendered_script, encoding="utf-8")
+    node.playwright_path = str(playwright_path)
     node.last_fingerprint = extraction.fingerprint
 
-    placeholder_count = rendered_steps.count("NotImplementedError")
     if placeholder_count > 0 and client is not None:
         logger.stage(
-            "steps_autoheal",
+            "playwright_autoheal",
             slug=node.slug,
             placeholders=placeholder_count,
             hint=(
-                "recommended scenarios produced assertion/nav steps that "
-                "could not be deterministically bound; asking the LLM to "
-                "fill each stub so every recommended test actually runs"
+                "some Playwright statements failed the renderer's static "
+                "validator; asking the LLM to rewrite those test bodies so "
+                "every generated test actually runs"
             ),
         )
         try:
@@ -1234,11 +1257,11 @@ def _process_url(
 
             heal_results = heal_steps(settings, HealOptions(slug=node.slug))
             applied = sum(1 for h in heal_results if h.applied)
-            placeholder_count = steps_path.read_text(encoding="utf-8").count(
+            placeholder_count = playwright_path.read_text(encoding="utf-8").count(
                 "NotImplementedError"
             )
             logger.ok(
-                "steps_autoheal_done",
+                "playwright_autoheal_done",
                 slug=node.slug,
                 stubs=len(heal_results),
                 applied=applied,
@@ -1246,7 +1269,7 @@ def _process_url(
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(
-                "steps_autoheal_failed",
+                "playwright_autoheal_failed",
                 slug=node.slug,
                 err=str(exc),
                 err_type=type(exc).__name__,
@@ -1255,28 +1278,30 @@ def _process_url(
     if placeholder_count > 0:
         node.status = Status.NEEDS_IMPLEMENTATION
         issues.append(
-            f"steps_placeholders={placeholder_count} (test file will fail until bound)"
+            f"playwright_placeholders={placeholder_count} (test file will fail until bound)"
         )
         logger.warn(
-            "steps_incomplete",
+            "playwright_incomplete",
             slug=node.slug,
-            path=str(steps_path),
+            path=str(playwright_path),
             placeholder_count=placeholder_count,
             hint=(
-                "Some step texts could not be bound to POM methods, "
-                "synthesized automatically, or healed by the LLM. Inspect "
-                "the placeholder bodies in the generated test file."
+                "Some generated statements could not be validated against the "
+                "POM or element catalog and were rendered as "
+                "NotImplementedError stubs. Rerun with `autocoder heal` or "
+                "enable AUTOCODER_AUTOHEAL during pytest."
             ),
         )
     else:
         node.status = Status.COMPLETE
 
     logger.ok(
-        "steps_written",
+        "playwright_written",
         slug=node.slug,
-        path=str(steps_path),
+        path=str(playwright_path),
         action="updated" if existed else "created",
         status=node.status.value,
+        tests=len(script_plan.tests),
         placeholders=placeholder_count,
     )
 
@@ -1288,7 +1313,7 @@ def _process_url(
         extraction=extraction,
         pom_path=pom_path,
         feature_path=feature_path,
-        steps_path=steps_path,
+        playwright_path=playwright_path,
         issues=issues,
     )
 

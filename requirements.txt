@@ -1,6 +1,5 @@
 playwright>=1.48.0
 pytest>=8.3.0
-pytest-bdd>=7.3.0
 pytest-playwright>=0.5.0
 pytest-xdist>=3.6.0
 python-dotenv>=1.0.1

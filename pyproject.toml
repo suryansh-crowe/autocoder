@@ -5,13 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "autocoder"
 version = "0.1.0"
-description = "URL-driven Playwright BDD test automation with local Phi-4 14B (Ollama). Auth-first, low-token, resumable."
+description = "URL-driven pure-Playwright test automation with local Phi-4 14B (Ollama) or Azure OpenAI. Auth-first, low-token, resumable."
 requires-python = ">=3.11"
 readme = "readme/README.md"
 dependencies = [
     "playwright>=1.48.0",
     "pytest>=8.3.0",
-    "pytest-bdd>=7.3.0",
     "pytest-playwright>=0.5.0",
     "python-dotenv>=1.0.1",
     "pydantic>=2.9.0",

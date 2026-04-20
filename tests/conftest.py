@@ -227,7 +227,7 @@ def browser_type_launch_args(browser_type_launch_args):  # noqa: F811
 
     By default ``pytest-playwright`` only honours its own ``--headed``
     flag — it does **not** read the ``HEADLESS`` env var. That's why
-    ``pytest tests/steps`` is silent even when ``.env`` has
+    ``pytest tests/playwright`` is silent even when ``.env`` has
     ``HEADLESS=false``. This fixture closes that gap.
 
     An explicit ``--headed`` / ``--headless`` CLI flag still wins,

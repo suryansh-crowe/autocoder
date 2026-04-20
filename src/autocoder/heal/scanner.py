@@ -1,14 +1,18 @@
-"""AST scanner — locate renderer-produced NotImplementedError stubs.
+"""AST scanner — locate Playwright test function stubs for healing.
 
-The scanner only flags bodies that match the **exact shape the
-renderer emits**:
+The scanner walks ``tests/playwright/test_<slug>.py`` files and
+returns every top-level ``test_*`` function whose body is exactly the
+renderer-shaped stub:
 
-    def _<slug>(<fixture>: <Class>) -> None:
+    def test_<name>(<fixture>: <Class>) -> None:
+        \"\"\"...\"\"\"
         raise NotImplementedError("Implement step: <text>")
 
-Anything else (a hand-edited body, a multi-statement body, a stub the
-user already replaced) is left alone. That preserves user edits across
-heal runs.
+Multi-statement bodies (healed tests, hand-edited tests) are left
+alone — we never overwrite human or previously-healed work through
+the stub-scan path. The failure-driven heal path uses
+:func:`find_function_in_file` instead, which matches by name and
+operates on whatever body is currently there.
 
 Each ``StubInfo`` carries enough context for the runner to call the
 LLM without re-parsing the file.
@@ -22,46 +26,54 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-_STUB_MESSAGE_PREFIX = "Implement step:"
+_STUB_MESSAGE_PREFIXES = ("Implement step:", "Implement test:")
 
 
 @dataclass(frozen=True)
 class StubInfo:
     file_path: Path
     function_name: str
-    body_lineno: int       # line of the `raise NotImplementedError(...)`
-    body_col_offset: int
-    step_text: str
-    keywords: tuple[str, ...]   # one or more of Given/When/Then
+    body_start_lineno: int     # first line of the body (after the def / docstring)
+    body_end_lineno: int       # last line of the body (inclusive)
+    scenario_title: str
     fixture_name: str
     fixture_class: str
-    pom_module: str        # e.g. "login_page" — used to resolve manifest paths
+    pom_module: str            # e.g. "login_page"
 
     @property
     def slug(self) -> str:
-        # `tests/steps/test_<slug>.py`
+        # ``tests/playwright/test_<slug>.py``
         stem = self.file_path.stem
         return stem.removeprefix("test_") or stem
 
 
-def _extract_step_text(call_node: ast.Call) -> str | None:
-    """Return the step text from `NotImplementedError("Implement step: X")`."""
+def _extract_stub_text(call_node: ast.Call) -> str | None:
+    """Return the trailing text from ``NotImplementedError('Implement ...: X')``."""
     if not call_node.args or not isinstance(call_node.args[0], ast.Constant):
         return None
     raw = call_node.args[0].value
-    if not isinstance(raw, str) or not raw.startswith(_STUB_MESSAGE_PREFIX):
+    if not isinstance(raw, str):
         return None
-    return raw[len(_STUB_MESSAGE_PREFIX):].strip().split(" (POM method ")[0]
+    for prefix in _STUB_MESSAGE_PREFIXES:
+        if raw.startswith(prefix):
+            return raw[len(prefix):].strip()
+    return None
 
 
 def _is_stub_body(body: list[ast.stmt]) -> ast.Call | None:
-    """Return the NotImplementedError call if `body` is *exactly* the stub
-    shape the renderer produces, else None. A single-statement body is
-    required so we never overwrite hand-edited multi-line bodies.
+    """Return the NotImplementedError call if ``body`` is *exactly* the stub shape.
+
+    Accepts both:
+      * body = [raise NotImplementedError(...)]
+      * body = [docstring, raise NotImplementedError(...)]
+    so scenarios whose only statement is the stub are heal-eligible.
     """
-    if len(body) != 1:
+    stmts = list(body)
+    if stmts and isinstance(stmts[0], ast.Expr) and isinstance(stmts[0].value, ast.Constant) and isinstance(stmts[0].value.value, str):
+        stmts = stmts[1:]
+    if len(stmts) != 1:
         return None
-    stmt = body[0]
+    stmt = stmts[0]
     if not isinstance(stmt, ast.Raise) or stmt.exc is None:
         return None
     exc = stmt.exc
@@ -72,23 +84,11 @@ def _is_stub_body(body: list[ast.stmt]) -> ast.Call | None:
     return exc
 
 
-def _decorator_keywords(decorator_list: list[ast.expr]) -> tuple[str, ...]:
-    """Return the set of pytest-bdd keywords stacked on a step function."""
-    seen: list[str] = []
-    for dec in decorator_list:
-        if isinstance(dec, ast.Call) and isinstance(dec.func, ast.Name):
-            kw = dec.func.id
-            if kw in {"given", "when", "then"} and kw not in seen:
-                seen.append(kw)
-    # Capitalise back to the Gherkin form for clarity in prompts/logs.
-    return tuple(k.capitalize() for k in seen)
-
-
 def _fixture_param(args: ast.arguments) -> tuple[str, str] | None:
-    """Pull (fixture_name, fixture_class) out of a step function's args.
+    """Pull (fixture_name, fixture_class) out of a Playwright test function's args.
 
     The renderer always declares the POM fixture as the first
-    positional arg with an annotation: ``def _x(login_page: LoginPage)``.
+    positional arg with an annotation: ``def test_x(pom: LoginPage)``.
     """
     if not args.args:
         return None
@@ -100,7 +100,7 @@ def _fixture_param(args: ast.arguments) -> tuple[str, str] | None:
 
 
 def _pom_module_from_imports(tree: ast.Module) -> str | None:
-    """Return the module name imported as `from tests.pages.X import Y`."""
+    """Return the module name imported as ``from tests.pages.X import Y``."""
     for node in tree.body:
         if not isinstance(node, ast.ImportFrom):
             continue
@@ -109,8 +109,41 @@ def _pom_module_from_imports(tree: ast.Module) -> str | None:
     return None
 
 
+def _docstring(node: ast.FunctionDef) -> str:
+    if (
+        node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    ):
+        return node.body[0].value.value.strip()
+    return ""
+
+
+def _body_span(node: ast.FunctionDef) -> tuple[int, int]:
+    """Return ``(first_body_lineno, last_body_end_lineno)`` for ``node``.
+
+    Skips the docstring if present so the heal applier replaces just
+    the executable body.
+    """
+    body = list(node.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    if not body:
+        # Empty body — defensively fall back to the function header line.
+        return node.lineno + 1, node.lineno + 1
+    start = body[0].lineno
+    end = body[-1].end_lineno or body[-1].lineno
+    return start, end
+
+
 def find_stubs_in_file(path: Path) -> list[StubInfo]:
-    """Return every renderer-shaped stub in `path`."""
+    """Return every renderer-shaped stub in ``path``."""
     try:
         source = path.read_text(encoding="utf-8")
     except OSError:
@@ -123,28 +156,22 @@ def find_stubs_in_file(path: Path) -> list[StubInfo]:
 
     out: list[StubInfo] = []
     for node in tree.body:
-        if not isinstance(node, ast.FunctionDef) or not node.name.startswith("_"):
+        if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
             continue
         stub_call = _is_stub_body(node.body)
         if stub_call is None:
             continue
-        step_text = _extract_step_text(stub_call)
-        if not step_text:
-            continue
         fx = _fixture_param(node.args)
         if fx is None:
             continue
-        keywords = _decorator_keywords(node.decorator_list)
-        if not keywords:
-            continue
+        body_start, body_end = _body_span(node)
         out.append(
             StubInfo(
                 file_path=path,
                 function_name=node.name,
-                body_lineno=node.body[0].lineno,
-                body_col_offset=node.body[0].col_offset,
-                step_text=step_text,
-                keywords=keywords,
+                body_start_lineno=body_start,
+                body_end_lineno=body_end,
+                scenario_title=_docstring(node) or node.name,
                 fixture_name=fx[0],
                 fixture_class=fx[1],
                 pom_module=pom_module,
@@ -153,8 +180,40 @@ def find_stubs_in_file(path: Path) -> list[StubInfo]:
     return out
 
 
+def find_function_in_file(path: Path, function_name: str) -> StubInfo | None:
+    """Locate a test function by name, whether or not its body is a stub.
+
+    Used by the failure-driven heal flow to target real code (not just
+    untouched stubs) so failing tests can be rewritten.
+    """
+    try:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+    except (OSError, SyntaxError):
+        return None
+    pom_module = _pom_module_from_imports(tree) or ""
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef) or node.name != function_name:
+            continue
+        fx = _fixture_param(node.args)
+        if fx is None:
+            return None
+        body_start, body_end = _body_span(node)
+        return StubInfo(
+            file_path=path,
+            function_name=node.name,
+            body_start_lineno=body_start,
+            body_end_lineno=body_end,
+            scenario_title=_docstring(node) or node.name,
+            fixture_name=fx[0],
+            fixture_class=fx[1],
+            pom_module=pom_module,
+        )
+    return None
+
+
 def find_stubs_in_dir(dir_path: Path, *, slug: str | None = None) -> list[StubInfo]:
-    """Walk `dir_path` for `test_*.py` files and collect every stub.
+    """Walk ``dir_path`` for ``test_*.py`` files and collect every stub.
 
     When ``slug`` is supplied, restrict to ``test_<slug>.py`` only.
     """
@@ -168,7 +227,7 @@ def find_stubs_in_dir(dir_path: Path, *, slug: str | None = None) -> list[StubIn
 
 
 def filter_unique(stubs: Iterable[StubInfo]) -> list[StubInfo]:
-    """Drop stubs whose `(file, function_name)` we have seen already."""
+    """Drop stubs whose ``(file, function_name)`` we have seen already."""
     seen: set[tuple[Path, str]] = set()
     out: list[StubInfo] = []
     for s in stubs:

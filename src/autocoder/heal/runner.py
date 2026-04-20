@@ -1,11 +1,14 @@
 """Heal runner — scan, ask the LLM, validate, apply.
 
-One LLM call per stub. Cached on disk by
-``(slug, step_text, page_fingerprint)`` so reruns spend zero tokens.
+One LLM call per failing (or stubbed) Playwright test function.
+Cached on disk by ``(slug, function_name, fingerprint)`` — for
+failure-driven heals, the failure class + error message are folded
+into the cache key so a fresh failure on the same function is treated
+as a new problem.
 
-The runner never aborts on a single bad suggestion — it logs and
-moves on, leaving that stub in place. The user can re-heal after
-fixing the underlying cause (missing POM method, bad extraction).
+The runner never aborts on a single bad suggestion: it logs and
+moves on, leaving the test body in place so the next run preserves
+whatever the user (or a prior heal) had there.
 """
 
 from __future__ import annotations
@@ -27,10 +30,13 @@ from autocoder.heal.prompts import (
     build_heal_prompt,
 )
 from autocoder.heal.pytest_failures import PytestFailure, run_pytest_capture
-from autocoder.heal.scanner import StubInfo, find_stubs_in_dir, find_stubs_in_file
+from autocoder.heal.scanner import StubInfo, find_function_in_file, find_stubs_in_dir
 from autocoder.heal.validator import validate_body
 from autocoder.llm.factory import get_llm_client
 from autocoder.llm.ollama_client import OllamaClient
+
+
+_MAX_STATEMENTS = 20
 
 
 @dataclass
@@ -38,7 +44,7 @@ class HealOptions:
     slug: str | None = None
     dry_run: bool = False
     force: bool = False
-    from_pytest: bool = False        # run pytest, heal failing steps
+    from_pytest: bool = False        # run pytest, heal failing tests
     pytest_paths: list[Path] = field(default_factory=list)
     junit_path: Path | None = None   # use an existing JUnit XML
 
@@ -56,10 +62,6 @@ class HealResult:
 # ---------------------------------------------------------------------------
 # Context loading: POM methods + element catalog per slug
 # ---------------------------------------------------------------------------
-
-
-def _slug_for_stub(stub: StubInfo) -> str:
-    return stub.slug
 
 
 def _load_pom_methods(settings: Settings, slug: str) -> tuple[list[dict], str]:
@@ -93,10 +95,7 @@ def _load_pom_methods(settings: Settings, slug: str) -> tuple[list[dict], str]:
 
 
 def _load_extraction(settings: Settings, slug: str) -> tuple[list[dict], str, str]:
-    """Return (compact_elements, page_url, fingerprint).
-
-    Compact-element shape matches what the planner prompts use.
-    """
+    """Return (compact_elements, page_url, fingerprint)."""
     path = settings.paths.extractions_dir / f"{slug}.json"
     if not path.exists():
         return [], "", ""
@@ -120,7 +119,9 @@ def _load_extraction(settings: Settings, slug: str) -> tuple[list[dict], str, st
 
 def _cache_key(stub: StubInfo, fingerprint: str, pom_methods: list[dict]) -> str:
     h = hashlib.sha256()
-    h.update(stub.step_text.encode("utf-8"))
+    h.update(stub.function_name.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(stub.scenario_title.encode("utf-8"))
     h.update(b"\x00")
     h.update(fingerprint.encode("utf-8"))
     h.update(b"\x00")
@@ -150,17 +151,28 @@ def _write_cache(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _statements_to_body(raw: dict) -> str:
+    """Pull ``statements`` (or legacy ``body``) out of an LLM reply."""
+    stmts = raw.get("statements")
+    if isinstance(stmts, list):
+        return "\n".join(str(s).strip() for s in stmts if str(s).strip())
+    body = raw.get("body")
+    if isinstance(body, str):
+        return body.strip()
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
 
 def heal_steps(settings: Settings, opts: HealOptions) -> list[HealResult]:
-    """Heal every renderer-shaped stub in the steps directory.
+    """Heal every stub in the Playwright tests directory.
 
     When ``opts.from_pytest`` is set (or ``opts.junit_path`` is
     supplied) the runner first runs pytest, then heals only the
-    step functions that actually failed at runtime — even if their
+    test functions that actually failed at runtime — even if their
     body is no longer a stub.
     """
     ensure_dirs(settings)
@@ -174,7 +186,7 @@ def heal_steps(settings: Settings, opts: HealOptions) -> list[HealResult]:
     if failures:
         return _heal_failures(settings, opts, failures, started)
 
-    stubs = find_stubs_in_dir(settings.paths.steps_dir, slug=opts.slug)
+    stubs = find_stubs_in_dir(settings.paths.playwright_dir, slug=opts.slug)
     logger.stage(
         "heal_start",
         stubs=len(stubs),
@@ -183,7 +195,7 @@ def heal_steps(settings: Settings, opts: HealOptions) -> list[HealResult]:
         force=opts.force,
     )
     if not stubs:
-        logger.ok("heal_done_nothing", reason="no NotImplementedError stubs found")
+        logger.ok("heal_done_nothing", reason="no NotImplementedError test stubs found")
         return []
 
     client = get_llm_client(settings)
@@ -203,7 +215,7 @@ def heal_steps(settings: Settings, opts: HealOptions) -> list[HealResult]:
         # Group stubs by slug so we load POM context once per file.
         by_slug: dict[str, list[StubInfo]] = {}
         for s in stubs:
-            by_slug.setdefault(_slug_for_stub(s), []).append(s)
+            by_slug.setdefault(s.slug, []).append(s)
 
         for slug, slug_stubs in by_slug.items():
             pom_methods, pom_plan_path = _load_pom_methods(settings, slug)
@@ -280,8 +292,8 @@ def _heal_one(
         )
     else:
         user_prompt = build_heal_prompt(
-            step_text=stub.step_text,
-            keywords=stub.keywords,
+            test_name=stub.function_name,
+            scenario_title=stub.scenario_title,
             pom_class=stub.fixture_class,
             fixture_name=stub.fixture_name,
             pom_methods=pom_methods,
@@ -303,7 +315,7 @@ def _heal_one(
             )
             return HealResult(stub=stub, issues=[f"llm error: {exc!s}"])
 
-        suggested = (raw.get("body") or "").strip()
+        suggested = _statements_to_body(raw)
         intent = (raw.get("intent") or "").strip()
 
     cleaned, val_errors = validate_body(
@@ -311,6 +323,7 @@ def _heal_one(
         fixture_name=stub.fixture_name,
         pom_method_names=pom_method_names,
         element_ids={e.get("id", "") for e in elements if e.get("id")},
+        max_statements=_MAX_STATEMENTS,
     )
     if val_errors:
         for msg in val_errors:
@@ -322,9 +335,6 @@ def _heal_one(
                 body=suggested[:80],
             )
         issues.extend(val_errors)
-        # Still cache the raw response so the user can inspect it; the
-        # cache stores both body + the validation errors so a rerun
-        # without --force does not re-spend tokens on a known-bad output.
         if cached is None:
             _write_cache(
                 cache_path,
@@ -339,7 +349,6 @@ def _heal_one(
             issues=issues,
         )
 
-    # Persist the validated cache entry so reruns are free.
     if cached is None:
         _write_cache(cache_path, {"body": cleaned, "intent": intent, "errors": []})
 
@@ -348,7 +357,7 @@ def _heal_one(
             "heal_dry_run",
             slug=stub.slug,
             func=stub.function_name,
-            body=cleaned[:80],
+            body=cleaned[:120],
             intent=intent[:60],
         )
         return HealResult(
@@ -383,7 +392,7 @@ def _heal_one(
             "heal_applied",
             slug=stub.slug,
             func=stub.function_name,
-            body=cleaned[:80],
+            body=cleaned[:120],
             intent=intent[:60],
             cached=cached is not None,
         )
@@ -411,7 +420,9 @@ def _gather_failures(settings: Settings, opts: HealOptions) -> list[PytestFailur
     junit_path = settings.paths.manifest_dir / "heals" / "last-pytest.xml"
     junit_path.parent.mkdir(parents=True, exist_ok=True)
     targets = opts.pytest_paths or [
-        settings.paths.steps_dir if not opts.slug else settings.paths.steps_dir / f"test_{opts.slug}.py"
+        settings.paths.playwright_dir
+        if not opts.slug
+        else settings.paths.playwright_dir / f"test_{opts.slug}.py"
     ]
     logger.info(
         "heal_pytest_run",
@@ -423,87 +434,15 @@ def _gather_failures(settings: Settings, opts: HealOptions) -> list[PytestFailur
     return failures
 
 
-def _stub_for_function(file_path: Path, function_name: str) -> StubInfo | None:
-    """Locate a step function in `file_path` by name and return a
-    StubInfo-shaped target — even if the body is no longer a stub.
-
-    This lets the failure-heal flow target real code, not just stubs.
-    """
-    import ast as _ast
-    try:
-        source = file_path.read_text(encoding="utf-8")
-        tree = _ast.parse(source, filename=str(file_path))
-    except (OSError, SyntaxError):
-        return None
-    pom_module = ""
-    for node in tree.body:
-        if isinstance(node, _ast.ImportFrom) and node.module and node.module.startswith("tests.pages."):
-            pom_module = node.module.split(".")[-1]
-            break
-    for node in tree.body:
-        if not isinstance(node, _ast.FunctionDef) or node.name != function_name:
-            continue
-        if not node.body or not node.args.args:
-            continue
-        first_arg = node.args.args[0]
-        fixture_class = (
-            first_arg.annotation.id
-            if isinstance(first_arg.annotation, _ast.Name)
-            else ""
-        )
-        # Pull the original step text from the @<keyword>(parsers.parse('TEXT')) deco
-        step_text = function_name.lstrip("_").replace("_", " ")
-        for dec in node.decorator_list:
-            if (
-                isinstance(dec, _ast.Call)
-                and isinstance(dec.func, _ast.Name)
-                and isinstance(dec.args, list)
-                and dec.args
-            ):
-                inner = dec.args[0]
-                if (
-                    isinstance(inner, _ast.Call)
-                    and isinstance(inner.func, _ast.Attribute)
-                    and inner.func.attr == "parse"
-                    and inner.args
-                    and isinstance(inner.args[0], _ast.Constant)
-                    and isinstance(inner.args[0].value, str)
-                ):
-                    step_text = inner.args[0].value
-                    break
-        keywords: list[str] = []
-        for dec in node.decorator_list:
-            if isinstance(dec, _ast.Call) and isinstance(dec.func, _ast.Name):
-                kw = dec.func.id
-                if kw in {"given", "when", "then"} and kw not in keywords:
-                    keywords.append(kw)
-        return StubInfo(
-            file_path=file_path,
-            function_name=function_name,
-            body_lineno=node.body[0].lineno,
-            body_col_offset=node.body[0].col_offset,
-            step_text=step_text,
-            keywords=tuple(k.capitalize() for k in keywords),
-            fixture_name=first_arg.arg,
-            fixture_class=fixture_class,
-            pom_module=pom_module,
-        )
-    return None
-
-
 def _current_body(stub: StubInfo) -> str:
-    """Read the current body lines of `stub` (everything between the
-    function header and either the next ``def`` / ``@deco`` / EOF)."""
-    import ast as _ast
+    """Return the current body text for ``stub`` (lines ``body_start..body_end``)."""
     try:
-        source = stub.file_path.read_text(encoding="utf-8")
-        tree = _ast.parse(source)
-    except (OSError, SyntaxError):
+        lines = stub.file_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
         return ""
-    for node in tree.body:
-        if isinstance(node, _ast.FunctionDef) and node.name == stub.function_name:
-            return "\n".join(_ast.unparse(s) for s in node.body)
-    return ""
+    start_idx = max(0, stub.body_start_lineno - 1)
+    end_idx = min(len(lines), stub.body_end_lineno)
+    return "\n".join(lines[start_idx:end_idx]).strip()
 
 
 def _heal_failures(
@@ -538,15 +477,16 @@ def _heal_failures(
     results: list[HealResult] = []
     try:
         for f in failures:
-            if not f.step_function:
+            target_fn = f.test_function or f.step_function
+            if not target_fn:
                 logger.warn("heal_failure_unmapped", test_id=f.test_id, err=f.error_message[:80])
                 continue
-            stub = _stub_for_function(f.test_file, f.step_function)
+            stub = find_function_in_file(f.test_file, target_fn)
             if stub is None:
                 logger.warn(
-                    "heal_step_not_found",
+                    "heal_test_not_found",
                     test_id=f.test_id,
-                    func=f.step_function,
+                    func=target_fn,
                     file=str(f.test_file),
                 )
                 continue
@@ -604,10 +544,14 @@ def _heal_one_failure(
     current_body: str,
     opts: HealOptions,
 ) -> HealResult:
-    # Cache key includes the failure-class + first 80 chars of error so a
-    # different failure on the same step is treated as a fresh problem.
     err_signature = (failure.failure_class + "|" + failure.error_message)[:80]
-    key_seed = stub.step_text + "\x00" + err_signature
+    key_seed = (
+        stub.function_name
+        + "\x00"
+        + stub.scenario_title
+        + "\x00"
+        + err_signature
+    )
     key = hashlib.sha256(key_seed.encode("utf-8") + fingerprint.encode("utf-8")).hexdigest()[:16]
     cache_path = _heals_dir(settings) / f"{stub.slug}.fail.{key}.json"
 
@@ -630,11 +574,11 @@ def _heal_one_failure(
         )
     else:
         prompt = build_failure_heal_prompt(
-            step_text=stub.step_text,
+            test_name=stub.function_name,
+            scenario_title=stub.scenario_title,
             current_body=current_body,
             error_message=failure.error_message,
             failure_class=failure.failure_class,
-            keywords=stub.keywords,
             pom_class=stub.fixture_class,
             fixture_name=stub.fixture_name,
             pom_methods=pom_methods,
@@ -656,7 +600,7 @@ def _heal_one_failure(
             )
             return HealResult(stub=stub, issues=[f"llm error: {exc!s}"])
 
-        suggested = (raw.get("body") or "").strip()
+        suggested = _statements_to_body(raw)
         intent = (raw.get("intent") or "").strip()
 
     cleaned, val_errors = validate_body(
@@ -664,7 +608,7 @@ def _heal_one_failure(
         fixture_name=stub.fixture_name,
         pom_method_names=pom_method_names,
         element_ids={e.get("id", "") for e in elements if e.get("id")},
-        max_statements=5,
+        max_statements=_MAX_STATEMENTS,
     )
     if val_errors:
         for msg in val_errors:
@@ -747,7 +691,7 @@ def report(results: Iterable[HealResult]) -> dict:
             {
                 "file": str(r.stub.file_path),
                 "func": r.stub.function_name,
-                "step": r.stub.step_text,
+                "scenario": r.stub.scenario_title,
                 "applied": r.applied,
                 "cached": r.cached,
                 "body": r.suggested_body,

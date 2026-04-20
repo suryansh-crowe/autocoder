@@ -129,9 +129,15 @@ class PageExtraction(BaseModel):
 
 
 class URLNode(BaseModel):
-    """Entry in the registry — one row per URL the user gave us."""
+    """Entry in the registry — one row per URL the user gave us.
 
-    model_config = ConfigDict(extra="forbid")
+    ``extra='ignore'`` so registries written by older versions of the
+    orchestrator (which tracked ``steps_path`` for pytest-bdd) can
+    still be loaded without a migration — the unknown key is dropped
+    and the new ``playwright_path`` is populated on the next run.
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     url: str
     slug: str
@@ -144,7 +150,7 @@ class URLNode(BaseModel):
     plan_path: str | None = None
     pom_path: str | None = None
     feature_path: str | None = None
-    steps_path: str | None = None
+    playwright_path: str | None = None
     last_fingerprint: str | None = None
     last_run_at: str | None = None
     # Verification state (populated by ``autocoder run`` — the integrated
@@ -298,3 +304,43 @@ class ScenarioPlan(BaseModel):
 
 
 FeaturePlan.model_rebuild()
+
+
+# ---------------------------------------------------------------------------
+# Pure-Playwright script plan (prompt 3 output)
+# ---------------------------------------------------------------------------
+
+
+class PlaywrightTest(BaseModel):
+    """One pytest test function in a generated script."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    scenario_title: str
+    tier: Literal[
+        "smoke",
+        "sanity",
+        "regression",
+        "happy",
+        "edge",
+        "validation",
+        "navigation",
+        "auth",
+        "rbac",
+        "e2e",
+    ] = "smoke"
+    tags: list[str] = Field(default_factory=list)
+    statements: list[str] = Field(default_factory=list)
+
+
+class PlaywrightScriptPlan(BaseModel):
+    """JSON action plan — pure-Playwright test module. Output of the 3rd prompt."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    pom_class: str
+    pom_fixture: str
+    pom_module: str
+    tests: list[PlaywrightTest] = Field(default_factory=list)

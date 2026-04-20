@@ -45,7 +45,7 @@ class SlugReport:
     inventory: dict
     scenarios: list[ScenarioRow] = field(default_factory=list)
     feature_path: Path | None = None
-    steps_path: Path | None = None
+    playwright_path: Path | None = None
     junit_path: Path | None = None
 
 
@@ -109,11 +109,12 @@ def _parse_feature_file(path: Path) -> list[tuple[str, list[str]]]:
 
 
 def _scenario_title_from_testcase(name: str) -> str:
-    """pytest-bdd emits testcase name like ``test_search_for_assets_in_catalog``.
+    """Convert a pytest test function name into a display title.
 
-    We strip the ``test_`` prefix, unescape underscores, and title-case
-    each word so the display matches the feature file's scenario
-    title as closely as possible.
+    Generated Playwright tests are named ``test_<snake_scenario_title>``.
+    We strip the ``test_`` prefix and replace underscores with spaces so
+    the display matches the feature file's scenario title as closely as
+    possible.
     """
     if name.startswith("test_"):
         name = name[len("test_") :]
@@ -169,7 +170,7 @@ def _run_pytest_for_slugs(settings: Settings, slugs: list[str]) -> None:
     runs_dir = settings.paths.manifest_dir / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
     for slug in slugs:
-        test_file = settings.paths.steps_dir / f"test_{slug}.py"
+        test_file = settings.paths.playwright_dir / f"test_{slug}.py"
         if not test_file.exists():
             logger.warn("report_pytest_skipped_missing", slug=slug, path=str(test_file))
             continue
@@ -190,7 +191,7 @@ def build_report(settings: Settings, *, run_pytest: bool) -> ReportData:
     """Produce the consolidated report data.
 
     When ``run_pytest`` is true, pytest is executed for every slug that
-    has a ``tests/steps/test_<slug>.py`` file, producing fresh JUnit
+    has a ``tests/playwright/test_<slug>.py`` file, producing fresh JUnit
     XML under ``manifest/runs/``. When false, existing JUnit files are
     used (scenarios without a JUnit record are marked *unknown*).
     """
@@ -205,7 +206,7 @@ def build_report(settings: Settings, *, run_pytest: bool) -> ReportData:
         if node.slug:
             slug_to_url[node.slug] = node.url
     if not slug_to_url:
-        for p in settings.paths.steps_dir.glob("test_*.py"):
+        for p in settings.paths.playwright_dir.glob("test_*.py"):
             slug_to_url[p.stem.removeprefix("test_")] = ""
     slug_list = sorted(slug_to_url.keys())
 
@@ -217,7 +218,7 @@ def build_report(settings: Settings, *, run_pytest: bool) -> ReportData:
     for slug in slug_list:
         url = slug_to_url.get(slug, "")
         feature_path = settings.paths.features_dir / f"{slug}.feature"
-        steps_path = settings.paths.steps_dir / f"test_{slug}.py"
+        playwright_path = settings.paths.playwright_dir / f"test_{slug}.py"
         junit_path = settings.paths.manifest_dir / "runs" / f"{slug}.xml"
 
         scenarios_raw = _parse_feature_file(feature_path)
@@ -261,7 +262,7 @@ def build_report(settings: Settings, *, run_pytest: bool) -> ReportData:
                 inventory=_load_extraction_inventory(settings, slug),
                 scenarios=scenarios,
                 feature_path=feature_path if feature_path.exists() else None,
-                steps_path=steps_path if steps_path.exists() else None,
+                playwright_path=playwright_path if playwright_path.exists() else None,
                 junit_path=junit_path if junit_path.exists() else None,
             )
         )

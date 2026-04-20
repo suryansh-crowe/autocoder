@@ -25,12 +25,13 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class PytestFailure:
-    test_id: str           # `tests/steps/test_login.py::test_smoke_...`
+    test_id: str           # `tests/playwright/test_login.py::test_smoke_...`
     test_file: Path        # absolute path to the test file
-    step_function: str     # the inner step function we land in (e.g. _i_click_X)
-    error_type: str        # `playwright._impl._errors.TimeoutError` etc.
-    error_message: str     # one-line summary
-    failure_class: str     # heuristic bucket: timeout|disabled|intercepted|wrong_kind|other
+    test_function: str     # the pytest test function that failed (e.g. test_smoke_login)
+    step_function: str = ""   # legacy alias kept for back-compat; populated for bdd layouts
+    error_type: str = ""   # `playwright._impl._errors.TimeoutError` etc.
+    error_message: str = ""   # one-line summary
+    failure_class: str = ""   # heuristic bucket: timeout|disabled|intercepted|wrong_kind|other
     raw_traceback: str = ""
 
 
@@ -101,24 +102,16 @@ def run_pytest_capture(
 # ---------------------------------------------------------------------------
 
 
-# Match a renderer-shaped step function name in a traceback line.
-# Two shapes pytest produces:
-#   * `tests/steps/test_login.py:28: in _i_click_sign_in_with_microsoft`
-#   * `_i_click_sign_in_with_microsoft(login_page)`
-# So we accept either `in _name` or `_name(`.
-_STEP_FN_RE = re.compile(r"\bin\s+(_[a-z][a-z0-9_]*)\b|\b(_[a-z][a-z0-9_]*)\(")
+# Match a Playwright test function name in a traceback line. Pytest
+# writes the frame as either ``in test_<name>`` or ``test_<name>(fixture)``.
+_TEST_FN_RE = re.compile(r"\bin\s+(test_[a-z0-9_]+)\b|\b(test_[a-z0-9_]+)\(")
 
 
-def _step_function_from_traceback(text: str) -> str:
-    """Walk the traceback for the deepest call into a step function.
-
-    Step functions always start with ``_`` and live in
-    ``tests/steps/test_*.py``. The deepest match in the trace is the
-    one that actually crashed before delegating to a POM.
-    """
+def _test_function_from_traceback(text: str) -> str:
+    """Walk the traceback for the deepest test_* function call."""
     candidates: list[str] = []
     for line in text.splitlines():
-        for m in _STEP_FN_RE.finditer(line):
+        for m in _TEST_FN_RE.finditer(line):
             candidates.append(m.group(1) or m.group(2))
     return candidates[-1] if candidates else ""
 
@@ -153,12 +146,16 @@ def parse_junit_xml(path: Path, *, base: Path | None = None) -> list[PytestFailu
         body = (failure.text or "").strip()
         first_line = (msg or body).splitlines()[0] if (msg or body) else ""
         err_type = failure.attrib.get("type", "")
-        step_fn = _step_function_from_traceback(body)
+        # Prefer an explicit ``test_*`` frame in the traceback. When the
+        # traceback does not mention one (pytest truncated it, custom
+        # hook) fall back to the testcase ``name`` attribute, which is
+        # the test function name pytest ran.
+        test_fn = _test_function_from_traceback(body) or name
         out.append(
             PytestFailure(
                 test_id=f"{classname}::{name}",
                 test_file=_abs_test_file(classname, name, base),
-                step_function=step_fn,
+                test_function=test_fn,
                 error_type=err_type,
                 error_message=first_line,
                 failure_class=classify(body or msg or first_line),

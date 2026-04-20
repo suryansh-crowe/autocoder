@@ -1,17 +1,14 @@
-"""Replace a stub body with the validated suggestion.
+"""Replace a test function body with validated statements.
 
-We deliberately use line-based replacement (not full AST round-trip)
-so that:
+The heal stage operates at the **test-function level**: the applier
+swaps every line between ``body_start_lineno`` and ``body_end_lineno``
+(inclusive) with the new list of statements, preserving the indent
+of the first body line and the file's existing line-ending style.
 
-* the rest of the file's formatting, decorators, and ordering are
-  preserved exactly,
-* hand-edited siblings are never touched,
-* a failed parse after the swap aborts the change with a rollback.
-
-The ``StubInfo`` carries the ``body_lineno`` of the original
-``raise NotImplementedError(...)`` line. Because the renderer always
-emits a single-line body indented by 4 spaces, we replace just that
-one line.
+The rest of the file (docstring, decorators, sibling tests, imports)
+is untouched. A post-replace ``ast.parse`` guards against any change
+that breaks the file — if it does, :class:`ValueError` is raised and
+the caller keeps the original file.
 """
 
 from __future__ import annotations
@@ -23,38 +20,49 @@ from autocoder.heal.scanner import StubInfo
 
 
 def _indent_for(lineno: int, lines: list[str]) -> str:
-    """Return the leading whitespace of `lineno` (1-based)."""
+    """Return the leading whitespace of ``lineno`` (1-based)."""
     if 1 <= lineno <= len(lines):
         line = lines[lineno - 1]
         return line[: len(line) - len(line.lstrip())]
     return "    "
 
 
-def apply_heal(stub: StubInfo, new_body: str) -> str:
-    """Return the file's new contents with `stub` replaced by `new_body`.
+def _detect_eol(line: str) -> str:
+    return "\r\n" if line.endswith("\r\n") else "\n"
 
-    Raises ``ValueError`` if the resulting source no longer parses —
-    in that case the caller must keep the original file untouched.
+
+def apply_heal(stub: StubInfo, new_body: str) -> str:
+    """Return the file's new contents with the test body replaced.
+
+    ``new_body`` may be a single statement or multiple statements
+    separated by newlines (``\\n``). Each non-empty line is re-indented
+    to the original body's indentation; empty lines are dropped so the
+    output is tidy.
+
+    Raises :class:`ValueError` when the resulting source no longer
+    parses — the caller must keep the original file untouched in that
+    case.
     """
     original = stub.file_path.read_text(encoding="utf-8")
     lines = original.splitlines(keepends=True)
-    line_idx = stub.body_lineno - 1
-    if line_idx < 0 or line_idx >= len(lines):
-        raise ValueError(f"body line {stub.body_lineno} out of range for {stub.file_path}")
+    start_idx = stub.body_start_lineno - 1
+    end_idx = stub.body_end_lineno - 1
+    if start_idx < 0 or end_idx >= len(lines) or end_idx < start_idx:
+        raise ValueError(
+            f"body span {stub.body_start_lineno}-{stub.body_end_lineno} "
+            f"out of range for {stub.file_path}"
+        )
 
-    indent = _indent_for(stub.body_lineno, lines)
-    eol = "\r\n" if lines[line_idx].endswith("\r\n") else "\n"
+    indent = _indent_for(stub.body_start_lineno, lines)
+    eol = _detect_eol(lines[start_idx])
 
-    # `new_body` may itself be multi-line if ast.unparse produced one.
-    # Indent each line consistently.
-    new_lines = [indent + ln for ln in new_body.splitlines() if ln]
-    if not new_lines:
-        new_lines = [indent + "pass"]
-    replacement = eol.join(new_lines) + eol
+    stmts = [s for s in (ln.rstrip() for ln in new_body.splitlines()) if s]
+    if not stmts:
+        stmts = ["pass"]
+    replacement = "".join(indent + stmt + eol for stmt in stmts)
 
-    rebuilt = "".join(lines[:line_idx]) + replacement + "".join(lines[line_idx + 1 :])
+    rebuilt = "".join(lines[:start_idx]) + replacement + "".join(lines[end_idx + 1 :])
 
-    # Sanity check — never write a file that won't parse.
     try:
         ast.parse(rebuilt, filename=str(stub.file_path))
     except SyntaxError as exc:

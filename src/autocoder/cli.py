@@ -123,7 +123,7 @@ def _resolve_or_exit(
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def cli() -> None:
-    """URL-driven Playwright BDD test automation."""
+    """URL-driven pure-Playwright test automation."""
 
 
 @cli.command("generate")
@@ -151,7 +151,7 @@ def generate(
     force: bool,
     skip_llm: bool,
 ) -> None:
-    """Generate POMs, features, and steps for one or more URLs.
+    """Generate POMs, features, and Playwright tests for one or more URLs.
 
     URL source priority: CLI args > --urls-file > $AUTOCODER_URLS.
     """
@@ -222,15 +222,15 @@ def run(
     verify: bool,
     max_heal_attempts: int,
 ) -> None:
-    """Generate POM + features + steps for every URL, with self-healing.
+    """Generate POM + feature + Playwright tests for every URL, with self-healing.
 
     Default behavior (no ``--verify``)
     ----------------------------------
     Runs intake, auth-first (with a shared long-lived browser so MSAL
     state survives into extraction), per-URL extraction, POM/feature/
-    steps rendering, and stops. **No pytest is invoked.** This is the
-    fast path for iterating on generation itself, and for giving users
-    a ready-to-run suite they execute on their own time.
+    Playwright-script rendering, and stops. **No pytest is invoked.**
+    This is the fast path for iterating on generation itself, and for
+    giving users a ready-to-run suite they execute on their own time.
 
     Heal behavior
     -------------
@@ -278,8 +278,8 @@ def run(
         logger.ok("cli_done", cmd="run", processed=len(results), verify=False)
         _console.print(
             "[cyan]Generation complete.[/] Run the suite with: "
-            "[bold]pytest tests/steps[/] "
-            "(set ``AUTOCODER_AUTOHEAL=true`` to heal failing steps live)."
+            "[bold]pytest tests/playwright[/] "
+            "(set ``AUTOCODER_AUTOHEAL=true`` to heal failing tests live)."
         )
         return
 
@@ -370,13 +370,13 @@ def extend(
 
 
 @cli.command("heal")
-@click.option("--slug", default=None, help="Restrict heal to a single URL's step file (test_<slug>.py).")
+@click.option("--slug", default=None, help="Restrict heal to a single URL's Playwright test file (test_<slug>.py).")
 @click.option("--dry-run", is_flag=True, help="Show what would change without writing files.")
 @click.option("--force", is_flag=True, help="Ignore the heal cache and re-call the LLM for every target.")
 @click.option(
     "--from-pytest",
     is_flag=True,
-    help="Run pytest first; heal step bodies whose test failed at runtime "
+    help="Run pytest first; heal test bodies whose test failed at runtime "
     "(uses the failure's error message as extra context).",
 )
 @click.option(
@@ -393,13 +393,13 @@ def heal(
     from_pytest: bool,
     junit_xml: Path | None,
 ) -> None:
-    """Auto-fix step bodies via the local LLM.
+    """Auto-fix Playwright test bodies via the LLM.
 
     Two modes:
 
-    * default — fill `NotImplementedError` stubs the renderer left.
-    * `--from-pytest` / `--junit-xml` — heal step bodies whose tests
-      failed at runtime, with the Playwright error as context.
+    * default — fill ``NotImplementedError`` stubs the renderer left.
+    * ``--from-pytest`` / ``--junit-xml`` — rewrite failing test bodies
+      at the function level, using the Playwright error as context.
 
     Both modes validate suggestions against the POM's real method
     list and cache results so reruns spend zero tokens unless
@@ -488,7 +488,7 @@ def report(run_pytest_flag: bool, as_json: bool) -> None:
                     "url": s.url,
                     "inventory": s.inventory,
                     "feature_path": str(s.feature_path) if s.feature_path else None,
-                    "steps_path": str(s.steps_path) if s.steps_path else None,
+                    "playwright_path": str(s.playwright_path) if s.playwright_path else None,
                     "junit_path": str(s.junit_path) if s.junit_path else None,
                     "scenarios": [
                         {
@@ -553,7 +553,7 @@ def _print_results(results) -> None:
         _console.print("[dim]No URLs processed.[/]")
         return
     table = Table(title="generated artifacts", show_lines=False)
-    for col in ("slug", "status", "pom", "feature", "steps"):
+    for col in ("slug", "status", "pom", "feature", "playwright"):
         table.add_column(col)
     for r in results:
         table.add_row(
@@ -561,7 +561,7 @@ def _print_results(results) -> None:
             r.node.status.value,
             _short_path(r.pom_path),
             _short_path(r.feature_path),
-            _short_path(r.steps_path),
+            _short_path(r.playwright_path),
         )
     _console.print(table)
 
@@ -572,7 +572,7 @@ def _print_cycle_outcome(outcome: CycleOutcome) -> None:
         return
 
     table = Table(title="autocoder run — full lifecycle", show_lines=False)
-    for col in ("slug", "generation", "tests", "heal_attempts", "final", "steps"):
+    for col in ("slug", "generation", "tests", "heal_attempts", "final", "playwright"):
         table.add_column(col, overflow="fold")
     gen_status_by_slug = {r.node.slug: r.node.status.value for r in outcome.generation}
     for r in outcome.generation:
@@ -599,7 +599,7 @@ def _print_cycle_outcome(outcome: CycleOutcome) -> None:
             tests_cell,
             str(heals),
             f"[{final_style}]{final}[/]",
-            _short_path(r.steps_path),
+            _short_path(r.playwright_path),
         )
     _console.print(table)
 
@@ -610,7 +610,7 @@ def _print_heal_results(results, *, dry_run: bool) -> None:
         return
     title = "heal preview (dry-run)" if dry_run else "heal results"
     table = Table(title=title, show_lines=False)
-    for col in ("file", "function", "step", "applied", "cached", "body"):
+    for col in ("file", "function", "scenario", "applied", "cached", "body"):
         table.add_column(col, overflow="fold")
     for r in results:
         applied = "yes" if r.applied else ("dry" if dry_run and not r.issues else "no")
@@ -619,7 +619,7 @@ def _print_heal_results(results, *, dry_run: bool) -> None:
         table.add_row(
             _short_path(r.stub.file_path),
             r.stub.function_name,
-            r.stub.step_text,
+            r.stub.scenario_title,
             applied,
             cached,
             body[:80],

@@ -1,13 +1,14 @@
 """Prompt builders.
 
-Two prompts are sent to the model. Both ask for *only* a JSON object:
+Three prompts are sent to the model, once per target page. All three
+ask for *only* a JSON object:
 
-* :func:`build_pom_prompt`     — page object plan
-* :func:`build_feature_prompt` — Gherkin feature plan
+* :func:`build_pom_prompt`              — page object plan
+* :func:`build_feature_prompt`          — Gherkin feature plan
+* :func:`build_playwright_codegen_prompt` — pure-Playwright pytest script
 
-Both prompts contain just the compact element catalog (id + role + name
-+ kind), nothing else. No DOM dumps, no full a11y trees, no source
-code. That is what keeps the input under ~1k tokens for typical pages.
+Inputs are kept minimal (compact element catalog + plan metadata) so
+typical pages stay under ~1k prompt tokens.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from __future__ import annotations
 import json
 from typing import Iterable
 
-from autocoder.models import Element, PageExtraction
+from autocoder.models import Element, FeaturePlan, PageExtraction, POMPlan
 
 
 # ---------------------------------------------------------------------------
@@ -263,5 +264,127 @@ def build_feature_prompt(
         "CONSEQUENCE assertions). Every Then step must name a DIFFERENT "
         "element than its When step. Reuse existing pom_methods where "
         "possible; set pom_method=null for pure assertions.\n\n"
+        + json.dumps(payload, separators=(",", ":"))
+    )
+
+
+# ---------------------------------------------------------------------------
+# Prompt 3 — Pure Playwright pytest script
+# ---------------------------------------------------------------------------
+
+
+PLAYWRIGHT_CODEGEN_SYSTEM = """You translate a Gherkin feature plan into a pure-Playwright pytest test module.
+Output a single JSON object — no prose, no markdown.
+
+Schema:
+{
+  "tests": [
+    {
+      "name": "<snake_case, starts with test_, <= 60 chars>",
+      "scenario_title": "<copied verbatim from the feature plan>",
+      "tier": "smoke|sanity|regression|happy|edge|validation|navigation|auth|rbac|e2e",
+      "tags": ["smoke"],
+      "statements": [
+        "<one Python statement per entry>"
+      ]
+    }
+  ]
+}
+
+Allowed in each statement (ONE statement per list entry; no imports, no defs):
+- pom.<method>(<args>)                      # method MUST appear in pom_methods
+- pom.navigate()                            # always available (inherited from BasePage)
+- pom.locate('<id>').click() / .check() / .fill('<value>') / .press('<key>')
+- pom.page.<playwright_method>(...)         # e.g. pom.page.wait_for_url(...)
+- expect(pom.locate('<id>')).to_be_visible() / .not_to_be_visible() / .to_be_checked() / .to_be_enabled() / .to_be_disabled() / .to_contain_text('<str>')
+- expect(pom.page).to_have_url(<str_or_regex>)
+- pass
+
+HARD RULES
+----------
+- ONE statement per list entry. No blank entries, no comments.
+- Each scenario in the feature plan becomes exactly ONE test function.
+- First statement of every test MUST be `pom.navigate()` so the page is loaded.
+- Use ONLY method names from `pom_methods`. Use ONLY element ids from `elements`.
+- The first `tag` MUST equal `tier`.
+- Assertions targeting the SAME element that was just clicked/filled are forbidden — the
+  consequence must name a DIFFERENT element id or a URL check.
+- Per-control test-case expectations (use these when shaping scenarios):
+    textbox   → fill + assert downstream result element / button enablement
+    button    → click + assert consequence element (modal, heading, toast, new section)
+    checkbox  → check + assert dependent control becomes enabled or a new region is visible
+    radio     → check + assert a partner element updates
+    select    → select + assert the dependent panel updates
+    link/tab  → click + assert URL change OR a destination-only heading is visible
+    form      → fill all required fields + submit + assert success heading;
+                and separately submit empty → assert the error helper text
+
+If a scenario cannot be implemented safely, emit `{"statements": ["pass"]}` so the run
+still produces a valid file — do NOT skip the test.
+"""
+
+
+def build_playwright_codegen_prompt(
+    extraction: PageExtraction,
+    *,
+    feature_plan: FeaturePlan,
+    pom_plan: POMPlan,
+) -> str:
+    """Payload for :data:`PLAYWRIGHT_CODEGEN_SYSTEM`.
+
+    Carries only the data the model needs to pick method + element ids:
+    the feature plan (scenarios + tiers + step texts), the POM method
+    list (names + args + element_id), and the compact element catalog.
+    """
+    payload = {
+        "url": extraction.final_url,
+        "pom_class": pom_plan.class_name,
+        "pom_fixture": pom_plan.fixture_name,
+        "pom_methods": [
+            {
+                "name": m.name,
+                "args": list(m.args or []),
+                "element_id": m.element_id,
+                "action": m.action,
+            }
+            for m in pom_plan.methods
+        ],
+        "elements": _compact_elements(extraction.elements),
+        "feature": {
+            "title": feature_plan.feature,
+            "description": feature_plan.description,
+            "background": [
+                {
+                    "keyword": s.keyword,
+                    "text": s.text,
+                    "pom_method": s.pom_method,
+                    "args": list(s.args or []),
+                }
+                for s in feature_plan.background
+            ],
+            "scenarios": [
+                {
+                    "title": sc.title,
+                    "tier": sc.tier,
+                    "steps": [
+                        {
+                            "keyword": s.keyword,
+                            "text": s.text,
+                            "pom_method": s.pom_method,
+                            "args": list(s.args or []),
+                        }
+                        for s in sc.steps
+                    ],
+                }
+                for sc in feature_plan.scenarios
+            ],
+        },
+    }
+    return (
+        "Translate every scenario into one pytest test function using the POM "
+        "fixture `pom`. First statement MUST be `pom.navigate()`. Reuse POM "
+        "methods where possible; fall back to `pom.locate('<id>').<action>()` "
+        "for primitives not covered by a method. Follow the per-control rules "
+        "in the system prompt when choosing assertions.\n\n"
         + json.dumps(payload, separators=(",", ":"))
     )

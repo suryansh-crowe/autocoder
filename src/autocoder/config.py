@@ -99,7 +99,7 @@ class Paths:
     storage_state: Path
     tests_dir: Path
     features_dir: Path
-    steps_dir: Path
+    playwright_dir: Path
     pages_dir: Path
     auth_setup_dir: Path
     registry_path: Path
@@ -168,7 +168,7 @@ def load_settings(project_root: Path | None = None) -> Settings:
         storage_state=storage_state,
         tests_dir=tests_dir,
         features_dir=tests_dir / "features",
-        steps_dir=tests_dir / "steps",
+        playwright_dir=tests_dir / "playwright",
         pages_dir=tests_dir / "pages",
         auth_setup_dir=tests_dir / "auth_setup",
         registry_path=manifest_dir / "registry.yaml",
@@ -233,7 +233,7 @@ def ensure_dirs(settings: Settings) -> None:
         settings.paths.logs_dir,
         settings.paths.tests_dir,
         settings.paths.features_dir,
-        settings.paths.steps_dir,
+        settings.paths.playwright_dir,
         settings.paths.pages_dir,
         settings.paths.auth_setup_dir,
         settings.paths.storage_state.parent,

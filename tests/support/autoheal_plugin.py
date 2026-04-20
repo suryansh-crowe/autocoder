@@ -51,7 +51,7 @@ AUTOCODER_AUTOHEAL_RERUN=true
 Per-run override:
 
 ```powershell
-AUTOCODER_AUTOHEAL=true pytest tests/steps
+AUTOCODER_AUTOHEAL=true pytest tests/playwright
 ```
 """
 

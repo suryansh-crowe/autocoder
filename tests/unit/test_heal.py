@@ -24,100 +24,98 @@ from autocoder.heal.validator import validate_body
 # ---------------------------------------------------------------------------
 
 
-def _write_steps(tmp_path: Path, body: str) -> Path:
-    f = tmp_path / "test_login.py"
+def _write_tests(tmp_path: Path, body: str, *, filename: str = "test_login.py") -> Path:
+    f = tmp_path / filename
     f.write_text(textwrap.dedent(body), encoding="utf-8")
     return f
 
 
-_HEADER = '''"""Generated step definitions."""
+_HEADER = '''"""Generated Playwright tests for Login."""
 from __future__ import annotations
 import pytest
 from playwright.sync_api import Page, expect
-from pytest_bdd import given, parsers, scenarios, then, when
 from tests.pages.login_page import LoginPage
 
-scenarios("login.feature")
 
 @pytest.fixture
-def login_page(page: Page) -> LoginPage:
+def pom(page: Page) -> LoginPage:
     return LoginPage(page)
 '''
 
 
 def test_scanner_finds_renderer_shaped_stub(tmp_path: Path) -> None:
-    f = _write_steps(
+    f = _write_tests(
         tmp_path,
         _HEADER + '''
 
-@given(parsers.parse('I am on the login page'))
-def _i_am_on_the_login_page(login_page: LoginPage) -> None:
-    raise NotImplementedError("Implement step: I am on the login page")
+@pytest.mark.smoke
+def test_login(pom: LoginPage) -> None:
+    """User signs in"""
+    raise NotImplementedError("Implement step: sign in")
 ''',
     )
     stubs = find_stubs_in_file(f)
     assert len(stubs) == 1
     s = stubs[0]
-    assert s.function_name == "_i_am_on_the_login_page"
-    assert s.step_text == "I am on the login page"
-    assert s.keywords == ("Given",)
-    assert s.fixture_name == "login_page"
+    assert s.function_name == "test_login"
+    assert s.scenario_title == "User signs in"
+    assert s.fixture_name == "pom"
     assert s.fixture_class == "LoginPage"
     assert s.pom_module == "login_page"
     assert s.slug == "login"
 
 
-def test_scanner_collects_multiple_decorators(tmp_path: Path) -> None:
-    f = _write_steps(
-        tmp_path,
-        _HEADER + '''
-
-@when(parsers.parse('I click X'))
-@given(parsers.parse('I click X'))
-def _i_click_x(login_page: LoginPage) -> None:
-    raise NotImplementedError("Implement step: I click X")
-''',
-    )
-    stubs = find_stubs_in_file(f)
-    assert len(stubs) == 1
-    assert set(stubs[0].keywords) == {"When", "Given"}
-
-
 def test_scanner_skips_hand_edited_body(tmp_path: Path) -> None:
-    f = _write_steps(
+    f = _write_tests(
         tmp_path,
         _HEADER + '''
 
-@given(parsers.parse('I am on the login page'))
-def _i_am_on_the_login_page(login_page: LoginPage) -> None:
-    login_page.navigate()
+@pytest.mark.smoke
+def test_login(pom: LoginPage) -> None:
+    """hand edited"""
+    pom.navigate()
 ''',
     )
     assert find_stubs_in_file(f) == []
 
 
 def test_scanner_skips_multi_statement_body(tmp_path: Path) -> None:
-    f = _write_steps(
+    f = _write_tests(
         tmp_path,
         _HEADER + '''
 
-@given(parsers.parse('compound'))
-def _compound(login_page: LoginPage) -> None:
-    print("hi")
+def test_compound(pom: LoginPage) -> None:
+    """compound"""
+    pom.navigate()
     raise NotImplementedError("Implement step: compound")
 ''',
     )
-    # multi-statement body → not the renderer's exact shape, leave alone.
+    # Multi-statement body → not the renderer's exact shape, leave alone.
     assert find_stubs_in_file(f) == []
 
 
-def test_scanner_skips_bodies_with_other_message(tmp_path: Path) -> None:
-    f = _write_steps(
+def test_scanner_accepts_docstring_plus_stub(tmp_path: Path) -> None:
+    """A function whose body is (docstring, raise NotImplementedError) IS a stub."""
+    f = _write_tests(
         tmp_path,
         _HEADER + '''
 
-@given(parsers.parse('something'))
-def _something(login_page: LoginPage) -> None:
+def test_with_doc(pom: LoginPage) -> None:
+    """A scenario title"""
+    raise NotImplementedError("Implement step: thing")
+''',
+    )
+    stubs = find_stubs_in_file(f)
+    assert len(stubs) == 1
+    assert stubs[0].scenario_title == "A scenario title"
+
+
+def test_scanner_skips_bodies_with_other_message(tmp_path: Path) -> None:
+    f = _write_tests(
+        tmp_path,
+        _HEADER + '''
+
+def test_something(pom: LoginPage) -> None:
     raise NotImplementedError("TODO: something else")
 ''',
     )
@@ -134,8 +132,8 @@ def test_scanner_dir_filters_by_slug(tmp_path: Path) -> None:
     a = tmp_path / "test_login.py"
     a.write_text(
         _HEADER + '''
-@given(parsers.parse('a'))
-def _a(login_page: LoginPage) -> None:
+
+def test_a(pom: LoginPage) -> None:
     raise NotImplementedError("Implement step: a")
 ''',
         encoding="utf-8",
@@ -144,8 +142,8 @@ def _a(login_page: LoginPage) -> None:
     b.write_text(
         _HEADER.replace("login_page", "other_page").replace("LoginPage", "OtherPage")
         + '''
-@given(parsers.parse('b'))
-def _b(other_page: OtherPage) -> None:
+
+def test_b(pom: OtherPage) -> None:
     raise NotImplementedError("Implement step: b")
 ''',
         encoding="utf-8",
@@ -161,24 +159,24 @@ def _b(other_page: OtherPage) -> None:
 # ---------------------------------------------------------------------------
 
 
-_FX = "login_page"
+_FX = "pom"
 _METHODS = {"navigate", "fill_email", "click_submit"}
 
 
 def test_validator_accepts_pom_method_call() -> None:
-    body, errs = validate_body("login_page.click_submit()", fixture_name=_FX, pom_method_names=_METHODS)
+    body, errs = validate_body("pom.click_submit()", fixture_name=_FX, pom_method_names=_METHODS)
     assert errs == []
-    assert body == "login_page.click_submit()"
+    assert body == "pom.click_submit()"
 
 
 def test_validator_accepts_navigate_even_if_not_in_methods() -> None:
-    body, errs = validate_body("login_page.navigate()", fixture_name=_FX, pom_method_names=set())
+    body, errs = validate_body("pom.navigate()", fixture_name=_FX, pom_method_names=set())
     assert errs == []
 
 
 def test_validator_accepts_locate_chain() -> None:
     body, errs = validate_body(
-        "expect(login_page.locate('submit')).to_be_visible()",
+        "expect(pom.locate('submit')).to_be_visible()",
         fixture_name=_FX,
         pom_method_names=_METHODS,
     )
@@ -193,14 +191,14 @@ def test_validator_accepts_pass() -> None:
 
 def test_validator_rejects_unknown_method() -> None:
     _, errs = validate_body(
-        "login_page.do_thing()", fixture_name=_FX, pom_method_names=_METHODS
+        "pom.do_thing()", fixture_name=_FX, pom_method_names=_METHODS
     )
     assert any("unknown method" in e for e in errs)
 
 
 def test_validator_rejects_multi_statement() -> None:
     _, errs = validate_body(
-        "login_page.navigate()\nlogin_page.click_submit()",
+        "pom.navigate()\npom.click_submit()",
         fixture_name=_FX,
         pom_method_names=_METHODS,
     )
@@ -222,7 +220,7 @@ def test_validator_rejects_def() -> None:
 
 def test_validator_rejects_lambda_inside_call() -> None:
     _, errs = validate_body(
-        "expect(login_page.page).to_have_url(lambda u: True)",
+        "expect(pom.page).to_have_url(lambda u: True)",
         fixture_name=_FX,
         pom_method_names=_METHODS,
     )
@@ -230,7 +228,7 @@ def test_validator_rejects_lambda_inside_call() -> None:
 
 
 def test_validator_rejects_syntax_error() -> None:
-    _, errs = validate_body("login_page.click_submit(", fixture_name=_FX, pom_method_names=_METHODS)
+    _, errs = validate_body("pom.click_submit(", fixture_name=_FX, pom_method_names=_METHODS)
     assert any("syntax error" in e for e in errs)
 
 
@@ -240,79 +238,77 @@ def test_validator_rejects_empty_body() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Applier — replaces ONLY the stub line and keeps the file parseable
+# Applier — replaces the whole test body (docstring untouched) and keeps
+# the file parseable.
 # ---------------------------------------------------------------------------
 
 
-def test_applier_replaces_stub_line_only(tmp_path: Path) -> None:
-    f = _write_steps(
+def test_applier_replaces_body_only(tmp_path: Path) -> None:
+    f = _write_tests(
         tmp_path,
         _HEADER + '''
 
-@given(parsers.parse('I am on the login page'))
-def _i_am_on_the_login_page(login_page: LoginPage) -> None:
-    raise NotImplementedError("Implement step: I am on the login page")
+def test_login(pom: LoginPage) -> None:
+    """Sign in"""
+    raise NotImplementedError("Implement step: sign in")
 
 
-@when(parsers.parse('I click submit'))
-def _i_click_submit(login_page: LoginPage) -> None:
-    login_page.click_submit()
+def test_submit(pom: LoginPage) -> None:
+    """Submit"""
+    pom.click_submit()
 ''',
     )
     stubs = find_stubs_in_file(f)
     assert len(stubs) == 1
-    new_text = apply_heal(stubs[0], "login_page.navigate()")
-    assert "login_page.navigate()" in new_text
-    assert "raise NotImplementedError" not in new_text.split("login_page.click_submit()")[0]
+    new_text = apply_heal(stubs[0], "pom.navigate()\npom.click_submit()")
+    assert "pom.navigate()" in new_text
+    assert "raise NotImplementedError" not in new_text.split("def test_submit")[0]
     # Hand-edited sibling untouched.
-    assert "login_page.click_submit()" in new_text
+    assert "def test_submit" in new_text and "pom.click_submit()" in new_text
     # File still parses.
     ast.parse(new_text)
 
 
 def test_applier_preserves_indentation(tmp_path: Path) -> None:
-    f = _write_steps(
+    f = _write_tests(
         tmp_path,
         _HEADER + '''
 
-@given(parsers.parse('a'))
-def _a(login_page: LoginPage) -> None:
+def test_a(pom: LoginPage) -> None:
     raise NotImplementedError("Implement step: a")
 ''',
     )
     stubs = find_stubs_in_file(f)
-    new_text = apply_heal(stubs[0], "login_page.navigate()")
-    assert "    login_page.navigate()" in new_text  # 4-space indent kept
+    new_text = apply_heal(stubs[0], "pom.navigate()")
+    assert "    pom.navigate()" in new_text  # 4-space indent kept
 
 
 def test_applier_aborts_when_result_does_not_parse(tmp_path: Path) -> None:
-    f = _write_steps(
+    f = _write_tests(
         tmp_path,
         _HEADER + '''
 
-@given(parsers.parse('a'))
-def _a(login_page: LoginPage) -> None:
+def test_a(pom: LoginPage) -> None:
     raise NotImplementedError("Implement step: a")
 ''',
     )
     stubs = find_stubs_in_file(f)
     with pytest.raises(ValueError, match="broke parse"):
-        apply_heal(stubs[0], "login_page.navigate(")
+        apply_heal(stubs[0], "pom.navigate(")
 
 
 def test_applier_idempotent_when_run_via_real_validation(tmp_path: Path) -> None:
     """Body that's already a valid heal target (not a stub) is not
     re-found by the scanner, so a second pass finds nothing."""
-    f = _write_steps(
+    f = _write_tests(
         tmp_path,
         _HEADER + '''
 
-@given(parsers.parse('a'))
-def _a(login_page: LoginPage) -> None:
+def test_a(pom: LoginPage) -> None:
     raise NotImplementedError("Implement step: a")
 ''',
     )
     stubs = find_stubs_in_file(f)
-    new_text = apply_heal(stubs[0], "login_page.navigate()")
+    new_text = apply_heal(stubs[0], "pom.navigate()")
     f.write_text(new_text, encoding="utf-8")
     assert find_stubs_in_file(f) == []

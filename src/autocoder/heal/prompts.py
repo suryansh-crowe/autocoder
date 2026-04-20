@@ -2,12 +2,17 @@
 
 Two prompt builders share the same JSON-only output contract:
 
-* :func:`build_heal_prompt` — for un-implemented stubs the renderer
-  left behind. Tiny envelope, single Python statement out.
-* :func:`build_failure_heal_prompt` — for steps that *did* run but
-  failed at runtime. Same schema, but the envelope carries the
-  current body + the Playwright error so the model can reason
+* :func:`build_heal_prompt` — for test functions whose body is a single
+  ``NotImplementedError`` stub (produced when the codegen prompt could
+  not map a scenario statement to a safe Playwright call). The model
+  emits a list of Python statements to run.
+* :func:`build_failure_heal_prompt` — for Playwright tests that *did*
+  run but failed at runtime. Same schema, but the envelope carries
+  the current body + the Playwright error so the model can reason
   about prerequisites (disabled buttons, modals, wrong primitive).
+
+Both prompts operate at the **test-function** level: one LLM call
+produces the full list of body statements for a failing test.
 """
 
 from __future__ import annotations
@@ -16,37 +21,41 @@ import json
 from typing import Iterable
 
 
-HEAL_SYSTEM = """You are a step-implementation assistant for a Playwright pytest-bdd suite.
+HEAL_SYSTEM = """You fill in the body of a pytest Playwright test function.
 Output a single JSON object — no prose, no markdown.
 
 Schema:
 {
-  "body": "<exactly one Python statement>",
-  "intent": "<one-line explanation, <= 60 chars>"
+  "statements": ["<one Python statement per entry, max 20>"],
+  "intent": "<one-line explanation, <= 80 chars>"
 }
 
-Allowed statements:
-- <fixture>.<method>(<args>)              # method MUST appear in pom_methods
-- <fixture>.navigate()                    # always available
-- expect(<fixture>.locate('<id>')).to_be_visible()
-- expect(<fixture>.page).to_have_url(...)
-- pass                                    # use only when nothing fits
+Allowed in each statement (ONE statement per list entry, no imports or defs):
+- <fixture>.<method>(<args>)                # method MUST appear in pom_methods
+- <fixture>.navigate()                      # always available (BasePage)
+- <fixture>.locate('<id>').click() / .check() / .fill('<value>') / .press('<key>')
+- <fixture>.page.<playwright_method>(...)
+- expect(<fixture>.locate('<id>')).to_be_visible() / .not_to_be_visible() / .to_be_checked() / .to_be_enabled() / .to_be_disabled() / .to_contain_text('<str>')
+- expect(<fixture>.page).to_have_url(<str_or_regex>)
+- pass                                      # only when nothing else fits
 
 Hard rules:
-- ONE statement only. No imports, no defs, no multi-line bodies.
-- Use ONLY method names from pom_methods, or `navigate`, or Playwright
-  primitives (`expect(...)`, `page.goto`, `page.wait_for_url`, etc.).
-- For "I am on the X page" / "I navigate to X" -> always pom.navigate().
-- For "X is visible" / "I should see X" -> expect(pom.locate('<id>')).to_be_visible().
-- For "I should be on X" / "I should be redirected to X" -> expect(pom.page).to_have_url(...).
-- When unsure, output {"body": "pass", "intent": "no safe binding"}.
+- ≤ 20 statements. No imports, defs, classes, with/for/while/try, lambdas.
+- First statement MUST be `<fixture>.navigate()` — the page must be loaded.
+- Use ONLY method names from pom_methods, or .locate(...) / .page (BasePage).
+- Element ids must come from the elements catalog.
+- For "user is on the X page" — emit `<fixture>.navigate()`.
+- For "X is visible" — emit `expect(<fixture>.locate('<id>')).to_be_visible()`.
+- For URL assertions — emit `expect(<fixture>.page).to_have_url(<value>)`.
+
+When no safe body fits, output {"statements": ["pass"], "intent": "no safe binding"}.
 """
 
 
 def build_heal_prompt(
     *,
-    step_text: str,
-    keywords: Iterable[str],
+    test_name: str,
+    scenario_title: str,
     pom_class: str,
     fixture_name: str,
     pom_methods: list[dict],
@@ -54,8 +63,8 @@ def build_heal_prompt(
     page_url: str | None,
 ) -> str:
     payload = {
-        "step_text": step_text,
-        "keywords": list(keywords),
+        "test_name": test_name,
+        "scenario_title": scenario_title,
         "pom_class": pom_class,
         "pom_fixture": fixture_name,
         "page_url": page_url or "",
@@ -63,7 +72,7 @@ def build_heal_prompt(
         "elements": elements,
     }
     return (
-        "Write the body for this Gherkin step.\n\n"
+        "Write the body statements for this Playwright test function.\n\n"
         + json.dumps(payload, separators=(",", ":"))
     )
 
@@ -73,49 +82,56 @@ def build_heal_prompt(
 # ---------------------------------------------------------------------------
 
 
-FAILURE_HEAL_SYSTEM = """You are a step-implementation assistant for a Playwright pytest-bdd suite.
-A step ran and failed at runtime. Your job is to suggest a NEW body
-for the step function so the next run gets further.
+FAILURE_HEAL_SYSTEM = """You rewrite the body of a failing pytest Playwright test function.
+A test ran and failed at runtime. Replace the ENTIRE body with statements that will pass.
 
 Output a single JSON object — no prose, no markdown.
 
 Schema:
 {
-  "body": "<one or more Python statements separated by '\\n'; max 5>",
+  "statements": ["<one Python statement per entry, max 20>"],
   "intent": "<one-line explanation, <= 80 chars>"
 }
 
-Allowed in each statement:
-- <fixture>.<method>(<args>)              # method MUST appear in pom_methods
-- <fixture>.locate('<id>').click() / .check() / .fill('value') / .press('Escape')
+Allowed in each statement (same as stub heal):
+- <fixture>.<method>(<args>)                # method MUST appear in pom_methods
+- <fixture>.navigate()                      # always available (BasePage)
+- <fixture>.locate('<id>').click() / .check() / .fill('<value>') / .press('<key>')
 - <fixture>.page.<playwright_method>(...)
-- expect(<fixture>.locate('<id>')).to_be_visible() / .to_be_enabled()
-- expect(<fixture>.page).to_have_url(...)
+- expect(<fixture>.locate('<id>')).to_be_visible() / .not_to_be_visible() / .to_be_checked() / .to_be_enabled() / .to_be_disabled() / .to_contain_text('<str>')
+- expect(<fixture>.page).to_have_url(<str_or_regex>)
 - pass
 
 Hard rules:
-- ≤ 5 statements. No imports, defs, classes, with/for/while/try, lambdas.
-- Use ONLY method names from pom_methods, or .locate(...) / .page (BasePage).
-- Element ids must come from the elements catalog.
+- ≤ 20 statements. No imports, defs, classes, with/for/while/try, lambdas.
+- First statement MUST be `<fixture>.navigate()`.
+- Use ONLY method names from pom_methods. Element ids must come from the elements catalog.
+- Do not re-emit the exact failing statement — either change the primitive, add a
+  prerequisite (checkbox, modal dismiss), or pick a different element id.
 
 Failure-class hints (the user supplies failure_class):
-- "disabled":     find an element that ENABLES the target (checkbox, toggle, prerequisite). Click/check it FIRST, then retry the original action.
-- "intercepted":  a modal or overlay is blocking. Press Escape, or click an element with name like "Close"/"Got it"/"Accept", then retry.
-- "wrong_kind":   the locator points at a different widget than expected. Replace `.fill()` with `.check()` for checkboxes, `.click()` for buttons. Use `.locate('<id>')` directly.
-- "locator_not_found" / "not_visible" / "not_attached": wait for the element first (`expect(...).to_be_visible()` then act), or pick a different element id from the catalog.
-- "timeout":      same as the underlying disabled / not-visible class — diagnose from the error_message.
+- "disabled":     add a prerequisite click/check (enabling checkbox, toggle) BEFORE retrying
+                  the original action.
+- "intercepted":  a modal/overlay is blocking. Dismiss it first (`page.keyboard.press('Escape')`
+                  or click the close button) then retry the action.
+- "wrong_kind":   replace `.fill()` with `.check()` for checkboxes, `.click()` for buttons,
+                  or use `.locate('<id>')` directly.
+- "locator_not_found" / "not_visible" / "not_attached":
+                  wait for the element first (`expect(...).to_be_visible()` then act), or pick
+                  a different element id from the catalog.
+- "timeout":      same as disabled / not_visible — diagnose from the error_message.
 
-If nothing safe fits, output {"body": "pass", "intent": "no safe binding"}.
+If nothing safe fits, output {"statements": ["pass"], "intent": "no safe binding"}.
 """
 
 
 def build_failure_heal_prompt(
     *,
-    step_text: str,
+    test_name: str,
+    scenario_title: str,
     current_body: str,
     error_message: str,
     failure_class: str,
-    keywords: Iterable[str],
     pom_class: str,
     fixture_name: str,
     pom_methods: list[dict],
@@ -123,11 +139,11 @@ def build_failure_heal_prompt(
     page_url: str | None,
 ) -> str:
     payload = {
-        "step_text": step_text,
+        "test_name": test_name,
+        "scenario_title": scenario_title,
         "current_body": current_body,
         "error_message": error_message,
         "failure_class": failure_class,
-        "keywords": list(keywords),
         "pom_class": pom_class,
         "pom_fixture": fixture_name,
         "page_url": page_url or "",
@@ -135,6 +151,6 @@ def build_failure_heal_prompt(
         "elements": elements,
     }
     return (
-        "Suggest a revised body for this failing step.\n\n"
+        "Suggest a revised body (list of statements) for this failing test.\n\n"
         + json.dumps(payload, separators=(",", ":"))
     )
