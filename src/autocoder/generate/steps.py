@@ -154,10 +154,23 @@ def _normalize(text: str) -> list[str]:
     return [w for w in words if w and w not in _STOPWORDS and len(w) > 1]
 
 
-def _best_element_match(tokens: list[str], elements: list[Element]) -> Element | None:
-    """Heuristic: score each element by token overlap with step text."""
+def _best_element_match(
+    tokens: list[str],
+    elements: list[Element],
+    *,
+    forbidden_ids: set[str] | None = None,
+) -> Element | None:
+    """Heuristic: score each element by token overlap with step text.
+
+    ``forbidden_ids`` lets the caller exclude elements that were
+    already acted on earlier in the same scenario — prevents the
+    "Then X is visible" fallback from pointing at the same element
+    the scenario's When step just clicked (which makes the assertion
+    meaningless).
+    """
     if not tokens or not elements:
         return None
+    forbidden = forbidden_ids or set()
 
     def _score(e: Element) -> int:
         pool = " ".join(
@@ -170,7 +183,10 @@ def _best_element_match(tokens: list[str], elements: list[Element]) -> Element |
                 hit += 1
         return hit
 
-    ranked = sorted(elements, key=_score, reverse=True)
+    pool = [e for e in elements if e.id not in forbidden]
+    if not pool:
+        return None
+    ranked = sorted(pool, key=_score, reverse=True)
     top = ranked[0]
     if _score(top) == 0:
         return None
@@ -236,14 +252,23 @@ def _try_synthesize(
     fixture_name: str,
     elements: list[Element],
     pom_method_names: list[str],
+    *,
+    forbidden_ids: set[str] | None = None,
 ) -> str | None:
     """Return a runnable Python body, or ``None`` if we cannot synthesize.
 
     The caller treats ``None`` as "fall through to NotImplementedError".
+
+    ``forbidden_ids`` is the set of element ids already acted on by
+    prior steps in the same scenario — the synthesizer refuses to
+    emit an assertion against any of them so the Then step is forced
+    to either match a distinct element or fall through to the LLM
+    heal for a meaningful consequence assertion.
     """
     text = step.text or ""
     tokens = _normalize(text)
     is_negated = bool(_NEGATION_RE.search(text))
+    forbidden = forbidden_ids or set()
 
     # 1. Navigation — "user is on the <X> page" → navigate() on the POM.
     if _NAV_PATTERN.search(text):
@@ -260,8 +285,14 @@ def _try_synthesize(
         if method:
             return f"{fixture_name}.{method}()"
 
-    # 3. Assertion patterns.
-    element = _best_element_match(tokens, elements)
+    # 3. Assertion patterns. For Then steps, skip elements that a
+    #    prior When step in the same scenario already acted on — a
+    #    consequence assertion should target something NEW.
+    element = _best_element_match(
+        tokens,
+        elements,
+        forbidden_ids=forbidden if step.keyword == "Then" else None,
+    )
     if element is not None:
         locator = f"{fixture_name}.locate({element.id!r})"
         for pattern, tpl in _ASSERTION_PATTERNS:
@@ -270,7 +301,8 @@ def _try_synthesize(
         # Fallback for pure `Then` steps that reference an element but
         # do not state a specific assertion — default to visibility.
         # Only for non-negated Then; "Then X is NOT <something>" must
-        # not become "expect visible".
+        # not become "expect visible". We also require the matched
+        # element to not be in `forbidden` (handled by the call above).
         if step.keyword == "Then" and not is_negated:
             return f"expect({locator}).to_be_visible()"
 
@@ -292,6 +324,8 @@ def _body(
     fixture_name: str,
     pom_args_by_method: dict[str, list[str]],
     elements: list[Element],
+    *,
+    forbidden_ids: set[str] | None = None,
 ) -> str:
     # Background / navigation hygiene: ``Given I am on the X page`` is
     # almost always a setup step that should actually load the page,
@@ -323,7 +357,11 @@ def _body(
         )
 
     synth = _try_synthesize(
-        step, fixture_name, elements, list(pom_args_by_method.keys())
+        step,
+        fixture_name,
+        elements,
+        list(pom_args_by_method.keys()),
+        forbidden_ids=forbidden_ids,
     )
     if synth is not None:
         return synth
@@ -349,6 +387,7 @@ def render_steps(
     fixture_name = pom_plan.fixture_name
     class_name = pom_plan.class_name
     pom_args_by_method = {m.name: list(m.args or []) for m in pom_plan.methods}
+    method_to_element = {m.name: m.element_id for m in pom_plan.methods if m.element_id}
     el_list: list[Element] = list(elements or [])
 
     parts: list[str] = [
@@ -367,6 +406,25 @@ def render_steps(
     all_steps: list[StepRef] = list(background_resolved)
     for scn in feature_plan.scenarios:
         all_steps.extend(_resolve_keywords(list(scn.steps)))
+
+    # Per-step-text forbidden element ids — union of every element id
+    # that was already acted on by a prior When/And step in any
+    # scenario this text participates in. The Then-step synthesizer
+    # uses this to avoid re-asserting the same element the scenario
+    # just clicked / filled.
+    forbidden_by_text: dict[str, set[str]] = {}
+    for scn in feature_plan.scenarios:
+        acted: set[str] = set()
+        for step in _resolve_keywords(list(scn.steps)):
+            if step.keyword == "Then":
+                forbidden_by_text.setdefault(step.text, set()).update(acted)
+                continue
+            if step.pom_method and step.pom_method in method_to_element:
+                acted.add(method_to_element[step.pom_method])
+            else:
+                match = _best_element_match(_normalize(step.text or ""), el_list)
+                if match is not None:
+                    acted.add(match.id)
 
     # Group by step text. Same text under multiple keywords becomes a
     # single function decorated with each keyword's decorator.
@@ -390,7 +448,14 @@ def render_steps(
             for kw in keywords
         )
         slug = _slug(text, idx)
-        body = _body(step, extracted_args, fixture_name, pom_args_by_method, el_list)
+        body = _body(
+            step,
+            extracted_args,
+            fixture_name,
+            pom_args_by_method,
+            el_list,
+            forbidden_ids=forbidden_by_text.get(text),
+        )
         extra_params = "".join(f", {a}: str" for a in extracted_args)
 
         parts.append(

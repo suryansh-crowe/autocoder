@@ -51,6 +51,7 @@ from autocoder.orchestrator import (
     run_generate,
     run_status,
 )
+from autocoder.report import ReportData, SlugReport, build_report
 
 
 _console = Console()
@@ -433,6 +434,88 @@ def heal(
     )
 
 
+@cli.command("report")
+@click.option(
+    "--run",
+    "run_pytest_flag",
+    is_flag=True,
+    help="Execute pytest for every generated suite before reporting. "
+    "Writes fresh JUnit XML into manifest/runs/<slug>.xml.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit the report as machine-readable JSON on stdout instead of rich tables.",
+)
+def report(run_pytest_flag: bool, as_json: bool) -> None:
+    """Consolidated coverage + execution report.
+
+    Shows, per URL:
+
+    * the UI components detected (search, chat, nav, forms, buttons…),
+    * every generated Gherkin scenario and its tier tags,
+    * pass/fail from the most recent pytest run,
+    * overall totals for the whole suite.
+
+    Pass ``--run`` to invoke pytest against every generated test file
+    first — that guarantees the table reflects the current code on
+    disk. Without ``--run``, existing JUnit XML under
+    ``manifest/runs/<slug>.xml`` is reused; missing files show as
+    ``unknown``.
+    """
+    settings = load_settings()
+    logger.init(settings.paths.logs_dir, level=settings.log_level, command="report")
+    logger.info(
+        "cli_invoke",
+        cmd="report",
+        run_pytest=run_pytest_flag,
+        json=as_json,
+        log_level=settings.log_level,
+        log_file=str(logger.active_log_path() or ""),
+    )
+    data = build_report(settings, run_pytest=run_pytest_flag)
+    if as_json:
+        import json as _json
+        payload = {
+            "total_scenarios": data.total_scenarios,
+            "passed": data.total_passed,
+            "failed": data.total_failed,
+            "unknown": data.total_unknown,
+            "slugs": [
+                {
+                    "slug": s.slug,
+                    "url": s.url,
+                    "inventory": s.inventory,
+                    "feature_path": str(s.feature_path) if s.feature_path else None,
+                    "steps_path": str(s.steps_path) if s.steps_path else None,
+                    "junit_path": str(s.junit_path) if s.junit_path else None,
+                    "scenarios": [
+                        {
+                            "title": sc.title,
+                            "tiers": sc.tiers,
+                            "passed": sc.passed,
+                            "error": sc.error,
+                        }
+                        for sc in s.scenarios
+                    ],
+                }
+                for s in data.slugs
+            ],
+        }
+        _console.print_json(_json.dumps(payload))
+    else:
+        _print_report(data)
+    logger.ok(
+        "cli_done",
+        cmd="report",
+        scenarios=data.total_scenarios,
+        passed=data.total_passed,
+        failed=data.total_failed,
+        unknown=data.total_unknown,
+    )
+
+
 @cli.command("status")
 def status() -> None:
     """Show what the registry currently knows."""
@@ -542,6 +625,94 @@ def _print_heal_results(results, *, dry_run: bool) -> None:
             body[:80],
         )
     _console.print(table)
+
+
+def _fmt_inventory(inv: dict) -> str:
+    """One-line summary of detected UI components."""
+    if not inv:
+        return "-"
+    parts: list[str] = []
+    labels = [
+        ("search", "search"),
+        ("chat", "chat"),
+        ("forms", "forms"),
+        ("nav", "nav"),
+        ("buttons", "buttons"),
+        ("choices", "choices"),
+        ("data", "data"),
+    ]
+    for key, label in labels:
+        val = inv.get(key)
+        if isinstance(val, list):
+            if val:
+                parts.append(f"{label}={len(val)}")
+        elif isinstance(val, int) and val:
+            parts.append(f"{label}={val}")
+    return ", ".join(parts) or "-"
+
+
+def _print_report(data: ReportData) -> None:
+    """Render the consolidated coverage + pass/fail tables."""
+    if not data.slugs:
+        _console.print("[dim]No URLs in registry or tests directory.[/]")
+        return
+
+    # --- 1) Per-URL coverage summary --------------------------------------
+    cov = Table(
+        title="per-URL coverage (detected UI components + scenario counts)",
+        show_lines=False,
+    )
+    for col in ("slug", "components", "scenarios", "pass", "fail", "unknown"):
+        cov.add_column(col, overflow="fold")
+    for s in data.slugs:
+        p = sum(1 for sc in s.scenarios if sc.passed is True)
+        f = sum(1 for sc in s.scenarios if sc.passed is False)
+        u = sum(1 for sc in s.scenarios if sc.passed is None)
+        cov.add_row(
+            s.slug,
+            _fmt_inventory(s.inventory),
+            str(len(s.scenarios)),
+            f"[green]{p}[/]" if p else "0",
+            f"[red]{f}[/]" if f else "0",
+            f"[yellow]{u}[/]" if u else "0",
+        )
+    _console.print(cov)
+
+    # --- 2) Per-scenario detail ------------------------------------------
+    detail = Table(title="per-scenario results", show_lines=False)
+    for col in ("slug", "scenario", "tiers", "result", "note"):
+        detail.add_column(col, overflow="fold")
+    for s in data.slugs:
+        for sc in s.scenarios:
+            if sc.passed is True:
+                result = "[green]pass[/]"
+            elif sc.passed is False:
+                result = "[red]fail[/]"
+            else:
+                result = "[yellow]unknown[/]"
+            note = sc.error[:80] if sc.error else ""
+            detail.add_row(
+                s.slug,
+                sc.title,
+                ",".join(sc.tiers) or "-",
+                result,
+                note,
+            )
+    _console.print(detail)
+
+    # --- 3) Overall summary ----------------------------------------------
+    summary = Table(title="overall summary", show_lines=False, show_header=False)
+    summary.add_column("metric")
+    summary.add_column("value", justify="right")
+    summary.add_row("URLs", str(len(data.slugs)))
+    summary.add_row("Scenarios", str(data.total_scenarios))
+    summary.add_row("[green]Passed[/]", str(data.total_passed))
+    summary.add_row("[red]Failed[/]", str(data.total_failed))
+    summary.add_row("[yellow]Unknown[/]", str(data.total_unknown))
+    if data.total_scenarios:
+        pct = 100.0 * data.total_passed / data.total_scenarios
+        summary.add_row("Pass rate", f"{pct:.1f}%")
+    _console.print(summary)
 
 
 def _short_path(path: Path | None) -> str:

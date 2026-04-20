@@ -714,6 +714,32 @@ def _materialise_auth(
         _run_and_persist_auth(auth, registry, settings, store, shared=shared)
         return
 
+    # Trust path: a valid ``storage_state`` file exists but the
+    # registry does not yet record ``STEPS_READY`` (common after
+    # ``manifest/registry.yaml`` was deleted / a fresh checkout uses
+    # a pre-captured session). Probing ``/login`` here is fragile:
+    # many SSO-backed SPAs 404 or redirect the login route for
+    # already-authenticated users, which would make
+    # ``build_auth_spec`` return ``None`` and the whole URL loop
+    # bail with ``url_skipped_awaiting_auth``. Instead, trust the
+    # storage file. If it turns out to be stale the first URL's
+    # extraction will hit the consent shell and the escalation +
+    # silent-reauth paths recover on the spot.
+    if storage_ok and auth.status != Status.STEPS_READY:
+        logger.info(
+            "auth_storage_trusted",
+            storage_state=str(settings.paths.storage_state),
+            hint=(
+                "valid storage_state on disk; skipping auth probe and "
+                "trusting the session. If the session is actually "
+                "stale, extraction will detect the consent shell and "
+                "trigger silent re-auth."
+            ),
+        )
+        registry.auth = auth.model_copy(update={"status": Status.STEPS_READY})
+        store.save(registry)
+        return
+
     logger.info("auth_probe_start", url=logger.safe_url(auth.login_url))
     with _session_or_open(shared, settings, use_storage=False) as sess:
         try:
@@ -1192,6 +1218,40 @@ def _process_url(
     node.last_fingerprint = extraction.fingerprint
 
     placeholder_count = rendered_steps.count("NotImplementedError")
+    if placeholder_count > 0 and client is not None:
+        logger.stage(
+            "steps_autoheal",
+            slug=node.slug,
+            placeholders=placeholder_count,
+            hint=(
+                "recommended scenarios produced assertion/nav steps that "
+                "could not be deterministically bound; asking the LLM to "
+                "fill each stub so every recommended test actually runs"
+            ),
+        )
+        try:
+            from autocoder.heal import HealOptions, heal_steps
+
+            heal_results = heal_steps(settings, HealOptions(slug=node.slug))
+            applied = sum(1 for h in heal_results if h.applied)
+            placeholder_count = steps_path.read_text(encoding="utf-8").count(
+                "NotImplementedError"
+            )
+            logger.ok(
+                "steps_autoheal_done",
+                slug=node.slug,
+                stubs=len(heal_results),
+                applied=applied,
+                remaining_placeholders=placeholder_count,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "steps_autoheal_failed",
+                slug=node.slug,
+                err=str(exc),
+                err_type=type(exc).__name__,
+            )
+
     if placeholder_count > 0:
         node.status = Status.NEEDS_IMPLEMENTATION
         issues.append(
@@ -1203,9 +1263,9 @@ def _process_url(
             path=str(steps_path),
             placeholder_count=placeholder_count,
             hint=(
-                "Some step texts could not be bound to POM methods or "
-                "synthesized automatically. Inspect the placeholder bodies "
-                "in the generated test file."
+                "Some step texts could not be bound to POM methods, "
+                "synthesized automatically, or healed by the LLM. Inspect "
+                "the placeholder bodies in the generated test file."
             ),
         )
     else:
