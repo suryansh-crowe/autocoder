@@ -52,12 +52,26 @@ class SlugReport:
 
 
 @dataclass
+class DefectRow:
+    """One frontend-classified failure surfaced by the heal engine."""
+
+    slug: str
+    test_id: str
+    step_function: str
+    error_type: str
+    error_message: str
+    failure_class: str
+    element_id: str
+
+
+@dataclass
 class ReportData:
     slugs: list[SlugReport]
     total_scenarios: int
     total_passed: int
     total_failed: int
     total_unknown: int
+    defects: list[DefectRow] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -268,13 +282,42 @@ def build_report(settings: Settings, *, run_pytest: bool) -> ReportData:
             )
         )
 
+    defects = _load_defects(settings)
+
     return ReportData(
         slugs=out,
         total_scenarios=total_pass + total_fail + total_unknown,
         total_passed=total_pass,
         total_failed=total_fail,
         total_unknown=total_unknown,
+        defects=defects,
     )
+
+
+def _load_defects(settings: Settings) -> list[DefectRow]:
+    """Read ``manifest/runs/defects.json`` written by the heal engine."""
+    path = settings.paths.manifest_dir / "runs" / "defects.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    out: list[DefectRow] = []
+    for slug, rows in data.items():
+        for row in rows:
+            out.append(
+                DefectRow(
+                    slug=str(slug),
+                    test_id=row.get("test_id", ""),
+                    step_function=row.get("step_function", ""),
+                    error_type=row.get("error_type", ""),
+                    error_message=row.get("error_message", ""),
+                    failure_class=row.get("failure_class", ""),
+                    element_id=row.get("element_id", ""),
+                )
+            )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +458,36 @@ def render_html_report(data: ReportData) -> str:
                 "</tr>"
             )
 
+    defect_rows_html: list[str] = []
+    for d in data.defects:
+        defect_rows_html.append(
+            "<tr>"
+            f"<td>{_html.escape(d.slug)}</td>"
+            f"<td>{_html.escape(d.step_function or d.test_id)}</td>"
+            f"<td><code>{_html.escape(d.element_id) or '<span class=muted>-</span>'}</code></td>"
+            f"<td><span class='tier'>{_html.escape(d.failure_class)}</span></td>"
+            f"<td><div class='err'>{_html.escape(d.error_message)}</div></td>"
+            "</tr>"
+        )
+    defects_section = ""
+    if defect_rows_html:
+        defects_section = f"""
+<h2>Application defects <span class="chip chip-forms">{len(defect_rows_html)}</span></h2>
+<div class="subtitle">
+  These failures are classified as real application bugs — the
+  referenced element was in the extraction catalog but the running
+  app no longer exposes it (or the app returned an HTTP / network
+  error). Heal deliberately skipped them so the defect surfaces
+  here instead of being masked by a rewritten test.
+</div>
+<table>
+  <thead><tr><th>Slug</th><th>Step / test</th><th>Element</th><th>Class</th><th>Error</th></tr></thead>
+  <tbody>
+{''.join(defect_rows_html)}
+  </tbody>
+</table>
+"""
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -451,6 +524,7 @@ def render_html_report(data: ReportData) -> str:
 {''.join(detail_rows)}
   </tbody>
 </table>
+{defects_section}
 </body>
 </html>
 """

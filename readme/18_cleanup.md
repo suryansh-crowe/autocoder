@@ -151,3 +151,32 @@ cases:
   again. Then re-run with `--force`.
 - **Keep generation but re-run tests** — delete `manifest/runs/` only,
   then `autocoder report --run`.
+
+## Auth-only reset (`autocoder auth-reset`)
+
+Don't want to wipe generated tests / extractions / plans — just want
+to force re-authentication on the next run? Use the dedicated CLI:
+
+```bash
+autocoder auth-reset            # interactive confirm
+autocoder auth-reset --yes      # scripts / CI — no prompt
+autocoder auth-reset --keep-spec  # clear session files only; keep
+                                  #   the registry AuthSpec (selectors,
+                                  #   auth_kind). Use when the login
+                                  #   page hasn't changed, just the
+                                  #   session expired.
+```
+
+What it removes (all with absent-file tolerance):
+
+- `.auth/user.json` — Playwright storage state (cookies + localStorage).
+- `.auth/user.session_storage.json` — MSAL sessionStorage snapshot.
+- `registry.auth` entry in `manifest/registry.yaml` (unless `--keep-spec`).
+
+Nothing else is touched — your generated POMs, features, steps,
+extraction snapshots, and plan caches all stay intact. The next
+`autocoder run` will re-detect the login page, re-render
+`tests/auth_setup/test_auth_setup.py`, and perform the in-process
+login flow again. Captured sessions are reinstated in
+`.auth/user.json` when the flow completes, and the settle step moves
+the browser off the OAuth return URL before extraction proceeds.

@@ -202,6 +202,45 @@ each URL against the *authenticated* DOM. This fixes the silent
 
 The event to look for: `auth_post_capture_invalidated count=<N>`.
 
+## Settle step (proactive nav after auth capture)
+
+Many enterprise MSAL apps register their OAuth ``redirect_uri`` as
+``/login`` (or another path that's a 404 in the SPA router). When
+the runner's success check fires on "MSAL tokens present in
+sessionStorage", the tab is still on that 404 shell. If per-URL
+extraction then starts from there, the SPA's first navigation to a
+protected route can bounce straight back to `/login` — MSAL hasn't
+yet had a chance to mount on a real page — and the extractor
+captures the 404 DOM as if it were the real application.
+
+`_settle_after_auth` in `orchestrator.py` runs immediately after
+`auth_session_captured`:
+
+1. If `base_url` is empty, or the post-auth URL is already inside
+   `base_url` and off `/login`, no-op.
+2. Otherwise `goto_resilient(base_url)` on the shared page.
+3. Wait up to 15 s for any interactive element to attach so MSAL
+   has time to rehydrate from stored tokens.
+4. If the auth-gated shell is still showing (SSO button visible),
+   run `_silent_reauth` — cheap because the tokens are already
+   cached, so the MSAL handshake completes without MFA.
+5. Log `auth_settle_done final_url=<url> on_login_shell=<bool>`.
+
+After that step, every per-URL `goto_resilient` starts from a
+hydrated authenticated SPA, not the raw OAuth return landing. The
+per-URL extraction path still has `_silent_reauth` as a backstop for
+edge cases, but `_settle_after_auth` removes the most common cause
+of "extracted the 404 consent shell" bugs.
+
+Events in order to grep for on a clean run:
+
+```
+auth_session_captured                    # tokens saved to .auth/user.json
+auth_settle_start    from_url=…/login    # proactive nav kicks in
+auth_settle_silent_reauth                # only when base_url also gated
+auth_settle_done     final_url=…/home    # ready for extraction
+```
+
 ## Storage state reuse
 
 `tests/conftest.py` loads `.auth/user.json` into every generated test
@@ -330,6 +369,11 @@ auth_sso_password_input_absent    # Entra did not show a password input — pass
 auth_sso_password_requested_but_absent  # Entra asked for a password but none is configured
 auth_awaiting_success             # runner is now waiting for MFA / final navigation
 auth_session_captured             # storage saved — success
+auth_settle_start                 # proactive nav off the OAuth return URL
+auth_settle_silent_reauth         # base_url still shows the shell; MSAL re-click
+auth_settle_nav_failed            # the base_url nav raised (extraction will retry)
+auth_settle_done                  # browser on a real authenticated route
+auth_settle_skipped               # post-auth URL was already good
 auth_post_capture_invalidated     # stale PUBLIC nodes marked for re-extract
 auth_session_awaiting_external    # flow paused for manual step
 auth_session_not_captured         # missing creds / unreachable / failed

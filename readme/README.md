@@ -22,6 +22,13 @@ viewable dashboard with per-URL component detection, per-scenario
 pass/fail, and overall totals — also regenerated automatically at
 the end of every `pytest tests/steps` session.
 
+Need to force a re-login without wiping your generated tests?
+`autocoder auth-reset` deletes just the captured session files
+(`.auth/user.json` + the MSAL sessionStorage snapshot) and clears
+the registry's AuthSpec. The next run re-probes the login page and
+captures a fresh session. Pass `--keep-spec` to keep the cached
+login-page selectors, `--yes` for non-interactive scripts.
+
 ## Reading order
 
 If you are new, read top-to-bottom. Each document is short enough to
@@ -46,6 +53,7 @@ finish in a few minutes.
 | 15 | [logging.md](15_logging.md) | Log levels, token accounting, decision events, redaction rules |
 | 17 | [heal.md](17_heal.md) | `autocoder heal` — fill stubs + heal runtime test failures |
 | 18 | [cleanup.md](18_cleanup.md) | Start from zero — one-shot commands to wipe generated artifacts + auth session |
+| 20 | [defects_vs_script.md](20_defects_vs_script.md) | Script-vs-frontend failure classifier — heal only rewrites test-code bugs; app defects surface in the report |
 
 ## Related docs outside this folder
 

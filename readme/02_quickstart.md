@@ -13,7 +13,7 @@ pip install -e .
 playwright install chromium
 ```
 
-**Verify:** `autocoder --help` lists `generate / run / extend / heal / rerun / status / report`.
+**Verify:** `autocoder --help` lists `generate / run / extend / heal / rerun / status / report / auth-reset`.
 
 ## 2. Start Phi-4 in Docker (loopback-only)
 
@@ -263,6 +263,7 @@ the real success URL, real credentials, real MFA flow.
 | Full HTML report (runs pytest first) | `autocoder report --run --html manifest/report.html` |
 | Re-render report from cached JUnit XML | `autocoder report --html manifest/report.html` |
 | Report as JSON for CI dashboards | `autocoder report --run --json` |
+| Force fresh authentication on next run | `autocoder auth-reset` (add `--yes` for scripts, `--keep-spec` to keep selectors) |
 | Verify local-only | `python scripts/verify_local_llm.py` |
 | Tail latest run log | `tail -f manifest/logs/$(ls -t manifest/logs \| head -1)` |
 | Start from scratch | See `18_cleanup.md` |

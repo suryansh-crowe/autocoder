@@ -53,13 +53,21 @@ autocoder heal --junit-xml report.xml # heal from an existing JUnit report
    **replaced with `pass  # no safe binding — validator rejected
    LLM output`** so the test still collects and runs without
    emitting a false assertion.
-5. **Applies** the validated body by line-replacement, then
-   re-parses the whole file as a sanity check. If the rewritten
-   file fails to parse, the change is aborted and the original is
-   kept untouched.
+5. **Applies** the validated body by **range-based replacement** —
+   `apply_heal` uses the AST to find the full line range of the
+   function body (not just its first line) and replaces the entire
+   range with the new body. This matters whenever a prior heal pass
+   already expanded the body into multiple lines: without a range
+   replace, the new body would be inserted in FRONT of the old one
+   and the function would accumulate duplicate statements across
+   runs. After writing, the file is re-parsed as a sanity check; a
+   failed parse aborts the change and the original is kept
+   untouched.
 6. **Caches** by `(slug, step_text, page_fingerprint, pom_method_set)`
    under `manifest/heals/`. Reruns of unchanged stubs spend zero
-   tokens.
+   tokens. Failure-heal caches additionally carry `failure_class`
+   and `error_message` so different failures on the same step
+   become different cache keys.
 
 ## What the LLM is allowed to emit
 
@@ -141,6 +149,49 @@ login_page.click_sign_in_with_microsoft()
 Cache key is `(slug, step_text, failure_class, error_message,
 fingerprint)` — a different failure on the same step is treated as
 a fresh problem, but identical failures on rerun are free.
+
+### Cache-staleness auto-bypass
+
+A subtle failure mode: the LLM's suggestion gets cached, applied to
+disk, the test runs, the test fails again with the same error (e.g.
+because the LLM guessed the wrong URL in a `to_have_url(...)`). On
+the next run, the failure hash is identical → cache hit → the same
+known-bad body gets re-applied → same failure loops forever.
+
+`_heal_one_failure` now detects this before reading the cache: if
+the cached body (AST-normalized) matches the CURRENT on-disk body
+(also AST-normalized — so indent/quote differences don't fool the
+check), the cache is busted and a fresh LLM call is issued with
+the pytest error message as context. The log event is
+`heal_fail_cache_busted reason=cached_body_is_currently_failing`.
+
+### Validator-rejected fallback
+
+Both stub heal and failure heal now fall back to a clean `pass`
+sentinel when the validator rejects the LLM's body:
+
+```python
+pass  # no safe binding — (failure-)heal validator rejected LLM output
+```
+
+This keeps the test collectable and runnable rather than leaving a
+syntactically invalid / semantically wrong body on disk that will
+crash with `AttributeError` / `SyntaxError` on the next pytest run.
+The rejected suggestion is still cached under `errors: [...]` so a
+human grep'ing `manifest/heals/` can see what was attempted.
+
+### New validator guards
+
+| Guard | Rejects | When |
+|-------|---------|------|
+| **Chained-non-assertion** | `expect(…).to_be_visible().click()` — chaining a non-assertion call after a Playwright Assertion method | Always |
+| **Stub-heal URL-assert** | Any `to_have_url(...)` in stub-heal context | Stub heal only (failure-heal keeps it, because the pytest error usually carries the right URL) |
+| **Trivial URL-assert** | `to_have_url(<current_page_url>)` — trivially true at start / wrong after nav | Both stub and failure heal |
+| **Hallucinated id** | `locate('<id>')` / `click('<id>')` etc. when `<id>` is not in the extraction catalog | Both |
+| **Forbidden-id** | `locate('<id>')` when `<id>` was acted on by a prior scenario step OR shares name tokens with such an id | Both |
+
+Rejected bodies surface as `heal_invalid_body` warnings; applied
+fallbacks as `heal_applied body=pass …`.
 
 ## Safety guarantees
 

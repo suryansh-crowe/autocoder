@@ -51,6 +51,7 @@ from autocoder.orchestrator import (
     run_generate,
     run_status,
 )
+from autocoder.registry.store import RegistryStore
 from autocoder.report import ReportData, SlugReport, build_report
 
 
@@ -511,6 +512,18 @@ def report(
             "passed": data.total_passed,
             "failed": data.total_failed,
             "unknown": data.total_unknown,
+            "defects": [
+                {
+                    "slug": d.slug,
+                    "test_id": d.test_id,
+                    "step_function": d.step_function,
+                    "error_type": d.error_type,
+                    "error_message": d.error_message,
+                    "failure_class": d.failure_class,
+                    "element_id": d.element_id,
+                }
+                for d in data.defects
+            ],
             "slugs": [
                 {
                     "slug": s.slug,
@@ -542,6 +555,85 @@ def report(
         passed=data.total_passed,
         failed=data.total_failed,
         unknown=data.total_unknown,
+    )
+
+
+@cli.command("auth-reset")
+@click.option(
+    "--yes",
+    "-y",
+    "assume_yes",
+    is_flag=True,
+    help="Skip the confirmation prompt. Useful in scripts / CI.",
+)
+@click.option(
+    "--keep-spec/--wipe-spec",
+    "keep_spec",
+    default=False,
+    show_default=True,
+    help="When --wipe-spec (default), clear the registry's AuthSpec so the next run "
+    "re-derives login shape + selectors. --keep-spec preserves the cached spec; "
+    "only the on-disk session files are removed.",
+)
+def auth_reset(assume_yes: bool, keep_spec: bool) -> None:
+    """Remove the captured auth session so the next run re-authenticates.
+
+    Deletes (all with absent-file tolerance):
+
+    * ``.auth/user.json`` — Playwright storage_state (cookies + localStorage).
+    * ``.auth/user.session_storage.json`` — MSAL sessionStorage snapshot.
+
+    With ``--wipe-spec`` (default) it also clears ``registry.auth`` —
+    next ``autocoder run`` re-probes the login page, re-infers
+    ``auth_kind``, re-renders ``tests/auth_setup/test_auth_setup.py``,
+    and then runs the in-process login flow. Use ``--keep-spec`` to
+    force only a session re-capture without disturbing the spec (e.g.
+    when the session expired but the page hasn't changed).
+    """
+    settings = load_settings()
+    logger.init(settings.paths.logs_dir, level=settings.log_level, command="auth-reset")
+    sp = settings.paths.storage_state
+    ssp = sp.with_name(sp.stem + ".session_storage" + sp.suffix)
+
+    will_delete = [p for p in (sp, ssp) if p.exists()]
+    store = RegistryStore(settings.paths.registry_path)
+    registry = store.load()
+    wipe_spec = not keep_spec and registry.auth is not None
+
+    if not will_delete and not wipe_spec:
+        _console.print("[dim]Nothing to reset — no auth files and no AuthSpec.[/]")
+        return
+
+    _console.print("[yellow]Will delete:[/]")
+    for p in will_delete:
+        _console.print(f"  • {p}")
+    if wipe_spec:
+        _console.print("  • registry.auth (login_url="
+                       f"[cyan]{registry.auth.login_url}[/], status={registry.auth.status.value})")
+    if not assume_yes:
+        if not click.confirm("Proceed?", default=True):
+            _console.print("[dim]Cancelled.[/]")
+            return
+
+    removed_paths: list[str] = []
+    for p in will_delete:
+        try:
+            p.unlink()
+            removed_paths.append(str(p))
+        except OSError as exc:
+            logger.warn("auth_reset_unlink_failed", path=str(p), err=str(exc))
+    if wipe_spec:
+        registry.auth = None
+        store.save(registry)
+    logger.ok(
+        "auth_reset_done",
+        removed_files=len(removed_paths),
+        spec_wiped=wipe_spec,
+        files=";".join(removed_paths) or "(none)",
+    )
+    _console.print(
+        f"[green]auth-reset complete[/] — {len(removed_paths)} file(s) removed, "
+        f"AuthSpec {'wiped' if wipe_spec else 'kept'}."
     )
 
 
@@ -729,7 +821,31 @@ def _print_report(data: ReportData) -> None:
             )
     _console.print(detail)
 
-    # --- 3) Overall summary ----------------------------------------------
+    # --- 3) Application defects (frontend failures) ----------------------
+    if data.defects:
+        defects_tbl = Table(
+            title=f"[red]application defects[/] — {len(data.defects)} frontend failure(s) NOT healed",
+            show_lines=False,
+        )
+        for col in ("slug", "step / test", "element", "class", "error"):
+            defects_tbl.add_column(col, overflow="fold")
+        for d in data.defects:
+            defects_tbl.add_row(
+                d.slug,
+                d.step_function or d.test_id,
+                d.element_id or "-",
+                f"[red]{d.failure_class}[/]",
+                d.error_message[:100],
+            )
+        _console.print(defects_tbl)
+        _console.print(
+            "[dim]These were classified as real app bugs — the referenced "
+            "element was in the extraction catalog but the running app no "
+            "longer exposes it. Heal intentionally skipped them so the "
+            "defect surfaces rather than being masked.[/]"
+        )
+
+    # --- 4) Overall summary ----------------------------------------------
     summary = Table(title="overall summary", show_lines=False, show_header=False)
     summary.add_column("metric")
     summary.add_column("value", justify="right")
@@ -738,6 +854,8 @@ def _print_report(data: ReportData) -> None:
     summary.add_row("[green]Passed[/]", str(data.total_passed))
     summary.add_row("[red]Failed[/]", str(data.total_failed))
     summary.add_row("[yellow]Unknown[/]", str(data.total_unknown))
+    if data.defects:
+        summary.add_row("[red]App defects[/]", str(len(data.defects)))
     if data.total_scenarios:
         pct = 100.0 * data.total_passed / data.total_scenarios
         summary.add_row("Pass rate", f"{pct:.1f}%")

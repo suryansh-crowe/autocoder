@@ -69,6 +69,10 @@ deterministic.
 │     to base_url succeeding (for apps whose redirect_uri is a   │
 │     404 /login route). Scans every page in the context so      │
 │     popup-based auth is captured too.                          │
+│   ─ settle step: right after capture, navigates the shared     │
+│     browser to base_url and (if needed) triggers silent MSAL   │
+│     re-auth — guarantees extraction starts from a hydrated SPA │
+│     not the OAuth return URL. Events: auth_settle_*            │
 │   ─ on success, stale-marks every non-LOGIN node so the next   │
 │     pass re-extracts under the session                         │
 │   ─ on awaiting_external_completion, persists any cookies the  │

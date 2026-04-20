@@ -112,6 +112,10 @@ events when you want to know "why?":
 | `auth_awaiting_success`       | Runner has finished what it can automate; now watching for the post-auth URL signal within `timeout_ms`. Complete MFA at this point if prompted. |
 | `url_skipped_awaiting_auth`   | Protected URL skipped because `requires_auth=True` but no storage state has been captured yet. |
 | `auth_session_captured`       | Login succeeded; `.auth/user.json` written. |
+| `auth_settle_start` / `auth_settle_done` / `auth_settle_skipped` | Proactive nav to `base_url` after capture so extraction starts from a hydrated SPA, not the OAuth return URL. `done` carries `final_url` + `on_login_shell`. |
+| `auth_settle_silent_reauth`   | Base URL still rendered the SSO shell; runner clicked the provider button once so MSAL rehydrates (no MFA — tokens cached). |
+| `auth_settle_nav_failed`      | `goto_resilient(base_url)` raised; per-URL extraction will retry with storage_state anyway. |
+| `auth_reset_done`             | `autocoder auth-reset` completed — lists removed files and whether the spec was wiped. |
 | `auth_post_capture_invalidated` | Count of non-LOGIN nodes whose status was reset so re-extraction happens under the new session. |
 | `auth_session_awaiting_external` | Runner reached a step it cannot automate (magic link, OTP, MFA). Any cookies set so far have been persisted. |
 | `auth_session_not_captured`   | Runner bailed (`missing_credentials`, `missing_password_for_password_mode`, `login_page_unreachable`, `success_indicator_not_seen`, ...). |
@@ -136,9 +140,10 @@ events when you want to know "why?":
 | `url_skipped`                 | Why an in-order URL was skipped (e.g. `login_url_covered_by_auth_setup`). |
 | `url_failed`                  | A URL's processing raised; logged with `err_type` so the run keeps going. |
 | `heal_context_loaded`         | Per-slug POM methods + element catalog the heal LLM will see. |
-| `heal_forbidden_ids`          | Element ids (per stub) that prior When/And steps in the same scenario acted on — the heal LLM is forbidden from asserting against these. |
+| `heal_forbidden_ids`          | Element ids (per stub) that prior When/And steps in the same scenario acted on — plus name-token siblings. The heal LLM is forbidden from asserting against these. |
+| `heal_fail_cache_busted`      | The failure-heal cached body already matches the CURRENT on-disk body and the test is still failing. Cache ignored; LLM re-called with fresh context. |
 | `heal_dry_run` / `heal_applied` | What the LLM proposed and whether it was written. |
-| `heal_invalid_body`           | Why a suggestion was rejected — includes the trivial-URL rule (`to_have_url(current_page_url)`) and the forbidden-id rule. Rejected bodies now fall back to `pass  # no safe binding` instead of leaving the NotImplementedError in place. |
+| `heal_invalid_body`           | Why a suggestion was rejected — the chained-non-assertion rule (`.to_be_visible().click()`), the stub-heal URL-assert ban, the trivial-URL rule, or the forbidden-id rule. Rejected bodies fall back to `pass  # no safe binding` (stub heal AND failure heal). |
 | `heal_apply_failed`           | Generated source did not re-parse; original kept untouched. |
 | `heal_pytest_run` / `heal_failures_collected` | `--from-pytest` invocation + parsed failure count. |
 | `report_pytest_run` / `report_pytest_failed` / `report_pytest_skipped_missing` | `autocoder report --run` per-slug pytest status. |

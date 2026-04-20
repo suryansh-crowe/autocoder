@@ -547,12 +547,76 @@ def _heal_one(
 # ---------------------------------------------------------------------------
 
 
+def _write_defect_log(settings: Settings, failures: list[PytestFailure]) -> None:
+    """Persist a machine-readable defect log so the report can surface it.
+
+    File shape: ``manifest/runs/defects.json`` — overwritten on each
+    ``_heal_failures`` invocation. Keyed by slug for easy rendering.
+    The report module reads this and renders a dedicated "Application
+    defects" section below the per-scenario pass/fail table.
+    """
+    path = settings.paths.manifest_dir / "runs" / "defects.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    by_slug: dict[str, list[dict]] = {}
+    for f in failures:
+        classname = f.test_id.split("::", 1)[0]
+        tail = classname.rsplit(".", 1)[-1]
+        slug = tail[len("test_"):] if tail.startswith("test_") else tail
+        by_slug.setdefault(slug, []).append(
+            {
+                "test_id": f.test_id,
+                "step_function": f.step_function,
+                "error_type": f.error_type,
+                "error_message": f.error_message,
+                "failure_class": f.failure_class,
+                "element_id": f.referenced_element_id,
+            }
+        )
+    path.write_text(json.dumps(by_slug, indent=2), encoding="utf-8")
+    logger.ok(
+        "frontend_defects_logged",
+        path=str(path),
+        slugs=len(by_slug),
+        total=sum(len(v) for v in by_slug.values()),
+    )
+
+
+def _element_ids_by_slug(settings: Settings) -> dict[str, set[str]]:
+    """Load the current extraction element-id catalog for every slug.
+
+    Used by the JUnit parser's origin classifier so it can decide
+    ``script`` vs. ``frontend`` based on whether the id the failing
+    step was targeting was known to the extractor.
+    """
+    out: dict[str, set[str]] = {}
+    ext_dir = settings.paths.extractions_dir
+    if not ext_dir.is_dir():
+        return out
+    for p in ext_dir.glob("*.json"):
+        if p.name.endswith(".prev.json"):
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        slug = p.stem
+        ids = {e.get("id", "") for e in data.get("elements", []) if e.get("id")}
+        if ids:
+            out[slug] = ids
+    return out
+
+
 def _gather_failures(settings: Settings, opts: HealOptions) -> list[PytestFailure]:
+    ids_by_slug = _element_ids_by_slug(settings)
     if opts.junit_path is not None:
         from autocoder.heal.pytest_failures import parse_junit_xml
         path = opts.junit_path
         logger.info("heal_failures_load", path=str(path))
-        return parse_junit_xml(path, base=settings.paths.project_root)
+        return parse_junit_xml(
+            path,
+            base=settings.paths.project_root,
+            element_ids_by_slug=ids_by_slug,
+        )
 
     junit_path = settings.paths.manifest_dir / "heals" / "last-pytest.xml"
     junit_path.parent.mkdir(parents=True, exist_ok=True)
@@ -564,7 +628,11 @@ def _gather_failures(settings: Settings, opts: HealOptions) -> list[PytestFailur
         targets=",".join(str(p) for p in targets),
         junit=str(junit_path),
     )
-    failures = run_pytest_capture(test_paths=targets, junit_path=junit_path)
+    failures = run_pytest_capture(
+        test_paths=targets,
+        junit_path=junit_path,
+        element_ids_by_slug=ids_by_slug,
+    )
     logger.info("heal_failures_collected", count=len(failures), junit=str(junit_path))
     return failures
 
@@ -658,15 +726,48 @@ def _heal_failures(
     failures: list[PytestFailure],
     started: float,
 ) -> list[HealResult]:
+    # Split on origin. Frontend failures are real application defects
+    # — we do NOT heal them. Healing an app bug rewrites the test
+    # into a no-op, silently masking the defect. Those go straight
+    # to the defect log. Script and ambiguous failures go through
+    # the usual heal flow.
+    frontend_failures = [f for f in failures if f.failure_origin == "frontend"]
+    healable_failures = [f for f in failures if f.failure_origin != "frontend"]
+
+    if frontend_failures:
+        for f in frontend_failures:
+            logger.warn(
+                "frontend_failure_detected",
+                test_id=f.test_id,
+                func=f.step_function,
+                element_id=f.referenced_element_id,
+                failure_class=f.failure_class,
+                err=f.error_message[:120],
+                hint=(
+                    "the referenced element was in the extraction catalog "
+                    "but the running app no longer exposes it — treat as "
+                    "an app defect; heal will NOT rewrite this test"
+                ),
+            )
+        _write_defect_log(settings, frontend_failures)
+
     logger.stage(
         "heal_from_pytest_start",
-        failures=len(failures),
+        failures=len(healable_failures),
+        frontend_skipped=len(frontend_failures),
         slug=opts.slug or "*",
         dry_run=opts.dry_run,
         force=opts.force,
     )
-    if not failures:
-        logger.ok("heal_done_nothing", reason="pytest reported no failures")
+    if not healable_failures:
+        logger.ok(
+            "heal_done_nothing",
+            reason=(
+                "no healable failures"
+                + (f" ({len(frontend_failures)} frontend defects recorded)"
+                   if frontend_failures else "")
+            ),
+        )
         return []
 
     client = get_llm_client(settings)
@@ -683,7 +784,7 @@ def _heal_failures(
 
     results: list[HealResult] = []
     try:
-        for f in failures:
+        for f in healable_failures:
             if not f.step_function:
                 logger.warn("heal_failure_unmapped", test_id=f.test_id, err=f.error_message[:80])
                 continue

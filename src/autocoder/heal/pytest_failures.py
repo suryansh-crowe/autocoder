@@ -31,6 +31,16 @@ class PytestFailure:
     error_type: str        # `playwright._impl._errors.TimeoutError` etc.
     error_message: str     # one-line summary
     failure_class: str     # heuristic bucket: timeout|disabled|intercepted|wrong_kind|other
+    # One of:
+    # * "script"    — bug in the generated test code. Heal it.
+    # * "frontend"  — real application defect. DO NOT heal; report it.
+    # * "ambiguous" — signal is unclear either way. Heal conservatively
+    #                 (still pass to LLM) but surface on the defect
+    #                 report so a human can double-check.
+    failure_origin: str = "ambiguous"
+    # The element id cited in the error, when one can be extracted.
+    # Used by the origin classifier to look up the extraction catalog.
+    referenced_element_id: str = ""
     raw_traceback: str = ""
 
 
@@ -59,6 +69,123 @@ def classify(error_message: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Failure-origin classification — script vs. frontend vs. ambiguous.
+# ---------------------------------------------------------------------------
+
+
+# Python-level error types that are (almost) always caused by a bad
+# generated body, not by the app under test. Matched against the
+# JUnit ``type`` attribute and the first traceback line.
+_SCRIPT_ERROR_TYPES = (
+    "AttributeError",
+    "NameError",
+    "SyntaxError",
+    "KeyError",
+    "ImportError",
+    "ModuleNotFoundError",
+    "IndentationError",
+    "TabError",
+)
+
+# HTTP/application-layer signals that point at the app itself.
+_FRONTEND_ERROR_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"HTTP\s*5\d{2}", re.IGNORECASE),
+    re.compile(r"status\s*5\d{2}", re.IGNORECASE),
+    re.compile(r"net::ERR_(?:CONNECTION|NAME|INTERNET|TUNNEL)", re.IGNORECASE),
+    re.compile(r"Cannot (?:GET|POST) ", re.IGNORECASE),
+    re.compile(r"Application Error", re.IGNORECASE),
+]
+
+
+# Pull an element id out of a Playwright error message. The resolver
+# emits messages like
+#   "no selector resolved: - role_name='button' ... ('open_stewie_assistant')"
+# and the generated POM often surfaces the id directly as
+#   "... locate('<id>') ..." in the traceback frame.
+_LOCATE_ID_RE = re.compile(r"locate\(\s*['\"]([a-z][a-z0-9_]*)['\"]", re.IGNORECASE)
+_SELECTORS_ID_RE = re.compile(
+    r"""element_id\s*['"]([a-z][a-z0-9_]*)['"]""", re.IGNORECASE
+)
+
+
+def _extract_referenced_element_id(error_message: str, raw_traceback: str) -> str:
+    """Best-effort: pull the element id the failing step was targeting.
+
+    Looks in the error message first (short), then the raw traceback.
+    Returns ``""`` when nothing can be extracted.
+    """
+    for src in (error_message, raw_traceback):
+        if not src:
+            continue
+        m = _LOCATE_ID_RE.search(src)
+        if m:
+            return m.group(1)
+        m = _SELECTORS_ID_RE.search(src)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def classify_origin(
+    *,
+    error_message: str,
+    error_type: str,
+    raw_traceback: str,
+    failure_class: str,
+    element_id: str,
+    known_element_ids: set[str] | None,
+) -> str:
+    """Decide whether this failure is a script bug or a frontend bug.
+
+    Decision tree (first match wins):
+
+    1. **Python exception types** (``AttributeError``, ``NameError``,
+       ``SyntaxError``, ``KeyError``, ``ImportError`` and friends) →
+       **script**. These come from the generated test code itself —
+       the app can't produce them.
+    2. **Explicit frontend signals** (``HTTP 5xx``, ``net::ERR_*``,
+       ``"Application Error"``, …) → **frontend**.
+    3. **Locator-not-found / not-attached / not-visible**: the
+       decision hinges on whether ``element_id`` is in the current
+       extraction catalog ``known_element_ids``.
+         * id **present** in the catalog → the extractor saw it, the
+           running app doesn't → **frontend** (UI changed under us).
+         * id **absent** from the catalog → the LLM/planner
+           invented or mis-picked it → **script**.
+         * no id extractable → **ambiguous**.
+    4. **wrong_kind** (``.fill()`` on a button etc.) → **script** —
+       the generated code used the wrong Playwright primitive.
+    5. **disabled** → **ambiguous**. Could be a missing prerequisite
+       click (script) or a genuine app state bug (frontend).
+       Default to ambiguous so the LLM can still try.
+    6. **intercepted** → **ambiguous** (modal overlay could be either).
+    7. **timeout** with no id cue → **ambiguous**.
+    8. Otherwise → **ambiguous**.
+    """
+    et = (error_type or "").split(".")[-1]
+    if et in _SCRIPT_ERROR_TYPES or any(
+        name in (raw_traceback or "") for name in _SCRIPT_ERROR_TYPES
+    ):
+        return "script"
+
+    combined = f"{error_message}\n{raw_traceback}"
+    if any(p.search(combined) for p in _FRONTEND_ERROR_PATTERNS):
+        return "frontend"
+
+    if failure_class in {"locator_not_found", "not_attached", "not_visible"}:
+        if not element_id:
+            return "ambiguous"
+        if known_element_ids is None:
+            return "ambiguous"
+        return "frontend" if element_id in known_element_ids else "script"
+
+    if failure_class == "wrong_kind":
+        return "script"
+
+    return "ambiguous"
+
+
+# ---------------------------------------------------------------------------
 # Subprocess driver
 # ---------------------------------------------------------------------------
 
@@ -68,11 +195,16 @@ def run_pytest_capture(
     test_paths: list[Path],
     junit_path: Path,
     extra_args: list[str] | None = None,
+    element_ids_by_slug: dict[str, set[str]] | None = None,
 ) -> list[PytestFailure]:
     """Run ``pytest`` and return parsed failures.
 
     The actual test outcome is *ignored* — heal cares only about
     failures, and a green run produces an empty list.
+
+    ``element_ids_by_slug`` is forwarded to ``parse_junit_xml`` so the
+    origin classifier can cross-check error-cited element ids against
+    each slug's extraction catalog.
     """
     junit_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -93,7 +225,7 @@ def run_pytest_capture(
             "pytest did not produce a JUnit XML report. "
             "Make sure pytest is installed in the active environment."
         )
-    return parse_junit_xml(junit_path)
+    return parse_junit_xml(junit_path, element_ids_by_slug=element_ids_by_slug)
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +262,26 @@ def _abs_test_file(classname: str, name: str, base: Path) -> Path:
     return (base / Path(*parts[:-1]) / f"{parts[-1]}.py").resolve()
 
 
-def parse_junit_xml(path: Path, *, base: Path | None = None) -> list[PytestFailure]:
+def _slug_from_classname(classname: str) -> str:
+    """`tests.steps.test_catalog` → `catalog`. Empty when the shape
+    doesn't match (e.g. auth_setup tests)."""
+    tail = classname.rsplit(".", 1)[-1]
+    return tail[len("test_"):] if tail.startswith("test_") else ""
+
+
+def parse_junit_xml(
+    path: Path,
+    *,
+    base: Path | None = None,
+    element_ids_by_slug: dict[str, set[str]] | None = None,
+) -> list[PytestFailure]:
+    """Parse a JUnit XML report into ``PytestFailure`` records.
+
+    ``element_ids_by_slug`` maps each slug (e.g. ``"catalog"``) to the
+    set of element ids present in that slug's current extraction
+    catalog. Supplied by callers that want origin classification —
+    when absent, every failure gets ``failure_origin="ambiguous"``.
+    """
     base = base or Path.cwd()
     try:
         tree = ET.parse(path)
@@ -154,6 +305,18 @@ def parse_junit_xml(path: Path, *, base: Path | None = None) -> list[PytestFailu
         first_line = (msg or body).splitlines()[0] if (msg or body) else ""
         err_type = failure.attrib.get("type", "")
         step_fn = _step_function_from_traceback(body)
+        slug = _slug_from_classname(classname)
+        known_ids = (element_ids_by_slug or {}).get(slug)
+        ref_id = _extract_referenced_element_id(first_line, body)
+        fclass = classify(body or msg or first_line)
+        origin = classify_origin(
+            error_message=first_line,
+            error_type=err_type,
+            raw_traceback=body,
+            failure_class=fclass,
+            element_id=ref_id,
+            known_element_ids=known_ids,
+        )
         out.append(
             PytestFailure(
                 test_id=f"{classname}::{name}",
@@ -161,7 +324,9 @@ def parse_junit_xml(path: Path, *, base: Path | None = None) -> list[PytestFailu
                 step_function=step_fn,
                 error_type=err_type,
                 error_message=first_line,
-                failure_class=classify(body or msg or first_line),
+                failure_class=fclass,
+                failure_origin=origin,
+                referenced_element_id=ref_id,
                 raw_traceback=body,
             )
         )

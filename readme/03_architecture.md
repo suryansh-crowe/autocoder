@@ -29,7 +29,7 @@ autocoder/                        Project root (= the "autocoder" project)
       models.py                   Pydantic models shared across stages
       utils.py                    slugify, fingerprint, identifier helpers
       logger.py                   Console + JSON-line file logger
-      cli.py                      `autocoder` CLI (generate / run / extend / heal / rerun / status / report)
+      cli.py                      `autocoder` CLI (generate / run / extend / heal / rerun / status / report / auth-reset)
       orchestrator.py             End-to-end pipeline that ties stages together;
                                    runs inline `steps_autoheal` + pre-write syntax guard
       report.py                   Coverage + execution report: per-URL component chips,

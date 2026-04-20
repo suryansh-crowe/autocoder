@@ -182,6 +182,26 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
         file=sys.stderr,
     )
 
+    # Surface the script-vs-frontend split to the user. The heal
+    # engine's own logs contain the detail, but the pytest terminal
+    # summary should flag "some of these failures are app defects,
+    # not test-code bugs — do not blame the tests".
+    try:
+        import json
+        defects_path = Path.cwd() / "manifest" / "runs" / "defects.json"
+        if defects_path.exists():
+            data = json.loads(defects_path.read_text(encoding="utf-8"))
+            total = sum(len(v) for v in data.values())
+            if total:
+                print(
+                    f"[autoheal] {total} frontend defect(s) NOT healed — "
+                    f"logged to {defects_path}. These are app bugs, not "
+                    "test bugs. See manifest/report.html → 'Application defects'.",
+                    file=sys.stderr,
+                )
+    except Exception:
+        pass
+
     if not applied:
         print(
             "[autoheal] nothing was patched -- inspect the step file(s) and "

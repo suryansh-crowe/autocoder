@@ -268,11 +268,31 @@ Ollama. It is intentionally thin:
 
 - One method, `chat_json(...)`, sets `format="json"`,
   `temperature=0.2`, `top_p=0.9`, and a configurable `num_predict`.
-- `httpx` is used with a long read timeout (default 600 s) because
-  CPU inference is slow.
-- Streaming is off — the orchestrator wants one decoded JSON object,
-  not a token stream.
-- Logs are emitted with input/output token counts and wall time.
+- **Streaming is on** — the client passes `stream=True` and
+  accumulates newline-delimited JSON chunks. This keeps the HTTP
+  connection active while Phi-4 generates, so the idle-read
+  timeout only ever fires if Ollama genuinely stalls.
+- **Per-purpose tuning.** Purposes starting with `heal:` /
+  `heal_fail:` are capped at `num_predict=200` (heal bodies are
+  1-5 short statements — a larger budget just lets the model
+  ramble past the JSON-valid stop point) and run at
+  `temperature=0.0` (greedy, the single highest-probability safe
+  body; heal is not a creative task).
+- `httpx` read timeout defaults to 1800 s (30 min) — that's the
+  idle-between-chunks timer, so in streaming mode it effectively
+  only matters during the silent **prompt-evaluation** phase
+  before the first token arrives. Prompt eval on CPU with a 4 K
+  context rarely exceeds 10 min; 30 min is comfortable headroom.
+- `OLLAMA_NUM_CTX=4096` is the recommended default — our largest
+  prompt is the feature plan at ~2.5 K tokens total, and a
+  smaller context buffer cuts prompt-eval wall time ~3× on CPU
+  compared to the older 12288.
+- Logs are emitted with input/output token counts, wall time, and
+  a per-10-second heartbeat (`ollama_stream_progress`
+  `phase=prompt_eval|gen`) so a slow CPU run never looks hung.
+  A dedicated `ollama_first_chunk prompt_eval_s=<float>` event
+  fires the moment the first token arrives, so you can measure
+  how much of each call was prompt-eval vs generation.
 
 ### JSON recovery ladder
 

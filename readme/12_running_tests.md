@@ -24,6 +24,28 @@ For form and Microsoft SSO flows, `autocoder generate` has already
 performed the login in-process and written `.auth/user.json`. You can
 jump straight to `pytest`.
 
+The generated `tests/auth_setup/test_auth_setup.py` is **excluded from
+default pytest runs** via `addopts = -m "not auth_setup"` in
+`pytest.ini`. That avoids two annoyances:
+
+* SSO / passwordless tenants fail the auth-setup test at
+  `_need("LOGIN_PASSWORD")` even though the session is already
+  captured — irrelevant noise in the CI / autoheal report.
+* Re-running the auth-setup test when `.auth/user.json` already
+  exists is wasted work.
+
+If you DO want to rerun the auth flow explicitly (credentials
+changed, session expired, you deleted `.auth/user.json`), use:
+
+```bash
+pytest -m auth_setup
+```
+
+The rendered auth-setup test has a first-line `_skip_if_session_captured()`
+guard — if `.auth/user.json` is still present, the test exits as
+**skipped** (green), not failed. Delete the file (or run
+`autocoder auth-reset`) to force a fresh capture.
+
 If the run log ended with `auth_session_awaiting_external` — magic
 link, OTP, or MFA that the runner can't complete on its own — finish
 it headful once:
