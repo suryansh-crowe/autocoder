@@ -64,7 +64,24 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('tests/conftest.py'\\).read\\(\\)\\); print\\('conftest ok'\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('src/autocoder/extract/auth_runner.py'\\).read\\(\\)\\); print\\('syntax ok'\\)\")",
       "Bash(python -m py_compile src/autocoder/extract/auth_runner.py)",
-      "Bash(python -m autocoder.cli --help)"
+      "Bash(python -m autocoder.cli --help)",
+      "Bash(rm -rf src/autocoder/llm/__pycache__)",
+      "Bash(docker --version)",
+      "Bash(docker volume *)",
+      "Bash(docker stop *)",
+      "Bash(docker rm *)",
+      "Bash(docker image *)",
+      "Bash(docker compose *)",
+      "Bash(tee /tmp/ollama-build.log)",
+      "Bash(echo \"build PID: $!\")",
+      "Read(//tmp/**)",
+      "Bash(docker system *)",
+      "Bash(rm -f /tmp/ollama-build.log)",
+      "Bash(curl -sf http://localhost:11434/api/tags)",
+      "Bash(netstat -ano)",
+      "Bash(powershell -Command 'Get-Process | Where-Object { $_.ProcessName -like '\\\\''*ollama*'\\\\'' } | Select-Object Id, ProcessName, Path')",
+      "Bash(powershell -Command 'Get-Process | Where-Object { $_.ProcessName -like '\\\\''*ollama*'\\\\'' } | Stop-Process -Force')",
+      "Bash(docker start *)"
     ]
   },
   "disabledMcpjsonServers": [

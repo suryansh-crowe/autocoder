@@ -47,6 +47,12 @@ finish in a few minutes.
 | 17 | [heal.md](17_heal.md) | `autocoder heal` — fill stubs + heal runtime test failures |
 | 18 | [cleanup.md](18_cleanup.md) | Start from zero — one-shot commands to wipe generated artifacts + auth session |
 
+## Related docs outside this folder
+
+| Path | Purpose |
+|------|---------|
+| [../docker/ollama/README.md](../docker/ollama/README.md) | Dockerfile + compose file for the Ollama+phi4 image (baked at build time). One command: `docker compose -f docker/ollama/docker-compose.yml up -d --build`. |
+
 ## Run reports
 
 End-to-end execution records, each pinned to a specific date and

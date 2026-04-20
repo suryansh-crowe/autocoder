@@ -17,18 +17,63 @@ playwright install chromium
 
 ## 2. Start Phi-4 in Docker (loopback-only)
 
+Only needed when `USE_AZURE_OPENAI=false` (the Ollama backend).
+Skip this step if you're using Azure OpenAI (step 3).
+
+The repo ships a Dockerfile + compose file under `docker/ollama/`
+that builds an image with `phi4:14b` **baked in at build time** —
+no runtime model pull, no first-request download delay.
+
 ```bash
-docker volume create autocoder-ollama-models
-docker run -d --name autocoder-phi4 --restart unless-stopped \
-  -p 127.0.0.1:11434:11434 \
-  -v autocoder-ollama-models:/root/.ollama \
-  -e OLLAMA_NUM_THREAD=8 -e OLLAMA_KEEP_ALIVE=30m \
-  ollama/ollama:latest
-docker exec -it autocoder-phi4 ollama pull phi4:14b
+docker compose -f docker/ollama/docker-compose.yml up -d --build
 ```
 
+That single command:
+
+1. Builds `autocoder-phi4:latest` from `docker/ollama/Dockerfile`.
+   During the `RUN` step, `ollama serve` is started in the
+   background, `ollama pull phi4:14b` downloads the ~9 GB Q4_K_M
+   weights, then the server is stopped — the model is now part of
+   the image layer.
+2. Starts the `autocoder-phi4` container with:
+   - `-p 127.0.0.1:11434:11434` (loopback-only, nothing on the LAN
+     can reach it),
+   - `-v autocoder-ollama-models:/root/.ollama` (named volume so
+     extra models you pull later survive rebuilds),
+   - `OLLAMA_KEEP_ALIVE=30m` / `OLLAMA_NUM_THREAD=8`.
+3. Waits for the healthcheck (`ollama list`) to report healthy.
+
+First build takes 5-20 min (depending on bandwidth). Subsequent
+rebuilds reuse the cached layer — no re-download.
+
+**Port conflict note:** if the Windows **Ollama desktop app** is
+installed, it auto-starts on login and grabs port 11434 — the
+container then fails to bind with
+`listen tcp 127.0.0.1:11434: bind: Only one usage of each socket
+address (protocol/network address/port) is normally permitted`.
+Stop it (`Get-Process ollama* | Stop-Process -Force` in
+PowerShell) or disable **Ollama** in *Task Manager → Startup
+apps*. The container and the desktop app can't both hold 11434.
+
 **Verify:** `curl http://localhost:11434/api/tags` lists `phi4:14b`.
-Full Docker walkthrough: `09_llm.md`.
+Full Docker walkthrough: `docker/ollama/README.md` and `09_llm.md`.
+
+### Lifecycle
+
+```bash
+# Stop / start without losing the container
+docker compose -f docker/ollama/docker-compose.yml stop
+docker compose -f docker/ollama/docker-compose.yml start
+
+# Tail inference logs
+docker compose -f docker/ollama/docker-compose.yml logs -f
+
+# Remove container (named volume kept)
+docker compose -f docker/ollama/docker-compose.yml down
+
+# Rebuild after changing the Dockerfile or bumping the model
+docker compose -f docker/ollama/docker-compose.yml up -d --build
+```
 
 ## 3. Configure `.env`
 
@@ -227,6 +272,8 @@ the real success URL, real credentials, real MFA flow.
 | Symptom | Fix |
 |---------|-----|
 | `ollama_unreachable` | `docker start autocoder-phi4`; `curl http://localhost:11434/api/tags` |
+| `bind: Only one usage of each socket address` on `docker compose up` | Windows Ollama desktop app is already listening on 11434. `Get-Process ollama* \| Stop-Process -Force` in PowerShell, then retry. Disable the **Ollama** entry in *Task Manager → Startup apps* to prevent recurrence. |
+| `ollama_http_error err=timed out` | Cold-load of the model on first request exceeded the idle-read timeout. Raise `OLLAMA_TIMEOUT_SECONDS=1200` in `.env`. The streaming client normally avoids this after the first call. |
 | `OllamaError: Could not parse JSON ... Unterminated string` | Raise `OLLAMA_NUM_PREDICT` in `.env` (2048+). The client already retries once with a stricter prompt and recovers fenced / truncated JSON before raising. |
 | `auth_session_not_captured reason=missing_credentials` | Set `LOGIN_USERNAME` in `.env`. |
 | `auth_session_not_captured reason=missing_password_for_password_mode` | Classic username+password app is detected and `LOGIN_PASSWORD` is not set. Set it — SSO modes do NOT trigger this any more. |

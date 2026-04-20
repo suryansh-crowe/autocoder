@@ -17,6 +17,28 @@ Swap the model with `OLLAMA_MODEL` in `.env`. The prompts are
 model-agnostic — any model that can return clean JSON in `format=json`
 mode will work.
 
+## Quick start with the bundled compose file (recommended)
+
+The repo ships `docker/ollama/Dockerfile` + `docker/ollama/docker-compose.yml`
+that build an image with `phi4:14b` already loaded. One command
+from the project root:
+
+```bash
+docker compose -f docker/ollama/docker-compose.yml up -d --build
+```
+
+That builds `autocoder-phi4:latest` (pulling `phi4:14b` into the
+image during the build), starts the container bound to
+`127.0.0.1:11434`, and applies `OLLAMA_KEEP_ALIVE=30m` +
+`OLLAMA_NUM_THREAD=8`. See `docker/ollama/README.md` for options:
+switching models (`--build-arg OLLAMA_MODEL=llama3.1:8b`),
+lazy-pull at runtime (smaller image), GPU offload on Linux, and
+Apple-Silicon native fallback.
+
+If you don't want the compose path and need to load the model
+into a pre-existing plain Ollama container by hand, the next
+sections walk through that flow step by step.
+
 ## Loading and running phi4:14b in your existing Ollama container
 
 Use this when the Ollama image is already pulled and a container
@@ -185,7 +207,7 @@ message if the endpoint is unreachable.
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | `Cannot connect to the Docker daemon` | Docker Desktop is not running | Start Docker Desktop; wait for *Running* status. |
-| `port is already allocated` on `docker run` | Native Ollama service holds 11434 | `Stop-Process -Name ollama -Force` (Windows) or `pkill ollama` (Linux/macOS), then retry. |
+| `port is already allocated` / `bind: Only one usage of each socket address` | Native Ollama service holds 11434 (Windows desktop app auto-starts on login) | `Get-Process ollama* \| Stop-Process -Force` (Windows) or `pkill ollama` (Linux/macOS). Disable **Ollama** in *Task Manager → Startup apps* to prevent recurrence, or change the container binding to `127.0.0.1:11435:11434` and set `OLLAMA_ENDPOINT=http://localhost:11435` in `.env`. |
 | `ollama pull` fails with `x509: certificate signed by unknown authority` | Corporate TLS inspector | Copy host root CAs into `/usr/local/share/ca-certificates/` in the container, run `update-ca-certificates`, restart. |
 | `pull` restarts after container rebuild | Volume not mounted | Recreate the container with `-v autocoder-ollama-models:/root/.ollama`. |
 | Orchestrator logs `ollama_unreachable` and exits | Container stopped or wrong endpoint | `docker start autocoder-phi4` and verify `OLLAMA_ENDPOINT` in `.env`. |

@@ -1,0 +1,183 @@
+version: 1
+base_url: ''
+auth:
+  login_url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/login
+  username_env: LOGIN_USERNAME
+  password_env: LOGIN_PASSWORD
+  otp_secret_env: LOGIN_OTP_SECRET
+  auth_kind: form
+  username_selector: null
+  password_selector: null
+  submit_selector: null
+  continue_selector: null
+  sso_button_selector: null
+  requires_external_completion: false
+  success_indicator_url_contains: null
+  success_indicator_text: null
+  setup_path: null
+  storage_state_path: C:\Users\singhs14\OneDrive - Crowe LLP\Desktop\autocoder\.auth\user.json
+  last_run_at: null
+  status: steps_ready
+  notes: []
+nodes:
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/home:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/home
+    slug: home
+    kind: public
+    requires_auth: true
+    depends_on: []
+    redirects_to: null
+    status: pending
+    extraction_path: null
+    plan_path: null
+    pom_path: null
+    feature_path: null
+    steps_path: null
+    last_fingerprint: null
+    last_run_at: null
+    last_verified_at: null
+    last_pytest_outcome: ''
+    heal_attempts: 0
+    notes:
+    - auth_gated_shell_detected
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/stewie:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/stewie
+    slug: stewie
+    kind: public
+    requires_auth: true
+    depends_on: []
+    redirects_to: null
+    status: pending
+    extraction_path: null
+    plan_path: null
+    pom_path: null
+    feature_path: null
+    steps_path: null
+    last_fingerprint: null
+    last_run_at: null
+    last_verified_at: null
+    last_pytest_outcome: ''
+    heal_attempts: 0
+    notes:
+    - auth_gated_shell_detected
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/catalog:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/catalog
+    slug: catalog
+    kind: public
+    requires_auth: true
+    depends_on: []
+    redirects_to: null
+    status: pending
+    extraction_path: null
+    plan_path: null
+    pom_path: null
+    feature_path: null
+    steps_path: null
+    last_fingerprint: null
+    last_run_at: null
+    last_verified_at: null
+    last_pytest_outcome: ''
+    heal_attempts: 0
+    notes:
+    - auth_gated_shell_detected
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/source-connection:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/source-connection
+    slug: source_connection
+    kind: public
+    requires_auth: true
+    depends_on: []
+    redirects_to: null
+    status: pending
+    extraction_path: null
+    plan_path: null
+    pom_path: null
+    feature_path: null
+    steps_path: null
+    last_fingerprint: null
+    last_run_at: null
+    last_verified_at: null
+    last_pytest_outcome: ''
+    heal_attempts: 0
+    notes:
+    - auth_gated_shell_detected
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/dq/insights:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/dq/insights
+    slug: dq_insights
+    kind: public
+    requires_auth: true
+    depends_on: []
+    redirects_to: null
+    status: pending
+    extraction_path: null
+    plan_path: null
+    pom_path: null
+    feature_path: null
+    steps_path: null
+    last_fingerprint: null
+    last_run_at: null
+    last_verified_at: null
+    last_pytest_outcome: ''
+    heal_attempts: 0
+    notes:
+    - auth_gated_shell_detected
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/sources:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/sources
+    slug: sources
+    kind: public
+    requires_auth: true
+    depends_on: []
+    redirects_to: null
+    status: pending
+    extraction_path: null
+    plan_path: null
+    pom_path: null
+    feature_path: null
+    steps_path: null
+    last_fingerprint: null
+    last_run_at: null
+    last_verified_at: null
+    last_pytest_outcome: ''
+    heal_attempts: 0
+    notes:
+    - auth_gated_shell_detected
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/agent:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/agent
+    slug: agent
+    kind: public
+    requires_auth: true
+    depends_on: []
+    redirects_to: null
+    status: pending
+    extraction_path: null
+    plan_path: null
+    pom_path: null
+    feature_path: null
+    steps_path: null
+    last_fingerprint: null
+    last_run_at: null
+    last_verified_at: null
+    last_pytest_outcome: ''
+    heal_attempts: 0
+    notes:
+    - auth_gated_shell_detected
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/security:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/security
+    slug: security
+    kind: public
+    requires_auth: true
+    depends_on: []
+    redirects_to: null
+    status: pending
+    extraction_path: null
+    plan_path: null
+    pom_path: null
+    feature_path: null
+    steps_path: null
+    last_fingerprint: null
+    last_run_at: null
+    last_verified_at: null
+    last_pytest_outcome: ''
+    heal_attempts: 0
+    notes:
+    - auth_gated_shell_detected
+updated_at: '2026-04-20T11:25:40+00:00'

@@ -1,0 +1,40 @@
+# One-command Ollama + phi4:14b for autocoder.
+#
+# Up:    docker compose -f docker/ollama/docker-compose.yml up -d
+# Down:  docker compose -f docker/ollama/docker-compose.yml down
+# Logs:  docker compose -f docker/ollama/docker-compose.yml logs -f
+#
+# The named volume `autocoder-ollama-models` survives container
+# rebuilds, so model weights are downloaded once even if you rebuild
+# the image.
+
+services:
+  ollama:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Override with: --build-arg OLLAMA_MODEL=llama3.1:8b
+      args:
+        OLLAMA_MODEL: phi4:14b
+    image: autocoder-phi4:latest
+    container_name: autocoder-phi4
+    restart: unless-stopped
+    # Loopback-only bind so nothing on the LAN can reach 11434.
+    ports:
+      - "127.0.0.1:11434:11434"
+    environment:
+      OLLAMA_KEEP_ALIVE: 30m
+      # Match your CPU core count for best throughput.
+      OLLAMA_NUM_THREAD: "8"
+    volumes:
+      - autocoder-ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  autocoder-ollama-models:
+    name: autocoder-ollama-models
