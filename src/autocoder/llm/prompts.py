@@ -85,8 +85,19 @@ dedicated scenario. Absent components MUST NOT produce scenarios.
 
 Heuristics:
 - search boxes (inventory.search > 0)
-  → generate a search scenario: enter a query, submit/filter, assert a
-    results region or list is visible (NOT the search box itself).
+  → generate at least TWO search scenarios:
+    (a) typed-query path: enter a real query, click Filter/Submit, and
+        assert a *results indicator* appears. The results indicator
+        MUST be an element that represents data/rows/pagination
+        (inventory.data entries, pagination buttons like "Next" /
+        "Previous" / numbered page buttons) — never the search box,
+        the filter button, or a page-chrome heading that is already
+        visible before the search.
+    (b) empty-query path: submit the search empty and assert either
+        a validation message or the pagination/results stays in its
+        unfiltered state. Tier=validation.
+  Do NOT assert a heading/title that was already visible on page load
+  as the search "result" — that passes trivially and tests nothing.
 - chat / ask / question textboxes (inventory.chat > 0)
   → generate a chat interaction scenario: type a prompt, send, assert
     the response / message area becomes visible (NOT the input).
@@ -161,7 +172,8 @@ _SEARCH_HINTS = ("search", "find", "lookup", "query", "filter")
 _CHAT_HINTS = ("ask", "chat", "message", "question", "prompt", "stewie")
 _NAV_HINTS = ("home", "back", "menu", "nav", "sidebar", "tab", "dashboard")
 _DATA_HINTS = ("row", "cell", "table", "list", "grid", "pagination", "page")
-_SUBMIT_HINTS = ("submit", "send", "save", "apply", "confirm", "continue", "next")
+_SUBMIT_HINTS = ("submit", "send", "save", "apply", "confirm", "continue")
+_PAGINATION_HINTS = ("next", "previous", "prev", "page ", "pagination")
 
 
 def _has_hint(element: Element, hints: tuple[str, ...]) -> bool:
@@ -187,6 +199,7 @@ def build_ui_inventory(extraction: PageExtraction) -> dict:
     action_buttons: list[str] = []
     choices: list[str] = []
     submits: list[str] = []
+    pagination: list[str] = []
 
     for e in extraction.elements:
         if e.kind in ("input", "textarea"):
@@ -200,11 +213,11 @@ def build_ui_inventory(extraction: PageExtraction) -> dict:
         if e.kind in ("row", "cell"):
             data_controls.append(e.id)
         if e.kind == "button":
-            if _has_hint(e, _SUBMIT_HINTS):
+            if _has_hint(e, _PAGINATION_HINTS):
+                pagination.append(e.id)
+            elif _has_hint(e, _SUBMIT_HINTS):
                 submits.append(e.id)
             elif _has_hint(e, _NAV_HINTS):
-                # nav-shaped buttons already in `nav` (via _NAV_HINTS);
-                # avoid double-counting as action.
                 if e.id not in nav:
                     nav.append(e.id)
             else:
@@ -217,6 +230,7 @@ def build_ui_inventory(extraction: PageExtraction) -> dict:
         "chat": chat[:5],
         "nav": nav[:8],
         "data": data_controls[:5],
+        "pagination": pagination[:5],
         "buttons": action_buttons[:8],
         "choices": choices[:6],
         "submits": submits[:4],

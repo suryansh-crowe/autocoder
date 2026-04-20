@@ -114,6 +114,136 @@ def _load_extraction(settings: Settings, slug: str) -> tuple[list[dict], str, st
 
 
 # ---------------------------------------------------------------------------
+# Scenario context — forbid re-asserting elements the scenario already acted on
+# ---------------------------------------------------------------------------
+
+
+_SCENARIO_HEADER_RE = __import__("re").compile(r"^\s*Scenario(?:\s+Outline)?:\s*(.+?)\s*$")
+_STEP_LINE_RE = __import__("re").compile(
+    r"^\s*(Given|When|Then|And|But)\s+(.+?)\s*$",
+)
+
+
+def _scenario_prior_step_texts(feature_path: "__import__('pathlib').Path", step_text: str) -> list[str]:
+    """Return the list of prior step texts in the scenario that owns *step_text*.
+
+    Parses the .feature file as plain text (we already do the same in
+    :mod:`autocoder.report`). When the scenario is not found — e.g.
+    feature file missing on disk, or the step text comes from a
+    background and not a scenario — returns an empty list.
+    """
+    if not feature_path.exists():
+        return []
+    try:
+        lines = feature_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+
+    # Walk scenarios; inside each, accumulate step texts until we hit
+    # the target step (in which case return the accumulator) or the
+    # next scenario boundary (reset).
+    current_steps: list[str] = []
+    inside_scenario = False
+    for raw in lines:
+        if _SCENARIO_HEADER_RE.match(raw):
+            current_steps = []
+            inside_scenario = True
+            continue
+        if not inside_scenario:
+            continue
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("@"):
+            continue
+        m = _STEP_LINE_RE.match(raw)
+        if not m:
+            continue
+        text = m.group(2).strip()
+        if text == step_text:
+            return list(current_steps)
+        current_steps.append(text)
+    return []
+
+
+def _compute_forbidden_ids(
+    *,
+    stub: StubInfo,
+    settings: Settings,
+    pom_methods: list[dict],
+    elements: list[dict],
+) -> list[str]:
+    """Element ids that prior When/And/Given steps in the scenario used.
+
+    We resolve each prior step to an element id two ways:
+    * direct match on a POM method's ``element_id`` via fuzzy name match,
+    * failing that, fuzzy token match against the element catalog.
+
+    The heal LLM must not emit an assertion against any of these ids —
+    that would re-assert the action target (the exact bug that produced
+    ``expect(catalog_page.locate('open_stewie_assistant')).to_be_visible()``
+    after the scenario already clicked it).
+    """
+    feature_path = settings.paths.features_dir / f"{stub.slug}.feature"
+    prior_texts = _scenario_prior_step_texts(feature_path, stub.step_text)
+    if not prior_texts:
+        return []
+
+    import re as _re
+
+    method_names = [m["name"] for m in pom_methods if m.get("name")]
+    method_to_element = {m["name"]: m.get("element_id", "") for m in pom_methods}
+    element_names = {
+        e["id"]: " ".join(
+            str(x) for x in (e.get("id", ""), e.get("name", ""), e.get("role", ""))
+        ).lower()
+        for e in elements
+    }
+
+    def _tokens(text: str) -> list[str]:
+        return [t for t in _re.findall(r"[a-z0-9]+", text.lower()) if len(t) > 1]
+
+    def _best_method(text: str) -> str | None:
+        toks = _tokens(text)
+        if not toks or not method_names:
+            return None
+        best, best_score = None, 0
+        for m in method_names:
+            parts = m.lower().split("_")
+            score = sum(1 for t in toks if t in parts)
+            if score > best_score:
+                best, best_score = m, score
+        return best if best_score >= 2 else None
+
+    def _best_element(text: str) -> str | None:
+        toks = _tokens(text)
+        if not toks:
+            return None
+        best, best_score = None, 0
+        for eid, pool in element_names.items():
+            score = sum(1 for t in toks if t in pool)
+            if score > best_score:
+                best, best_score = eid, score
+        return best if best_score >= 1 else None
+
+    forbidden: list[str] = []
+    for text in prior_texts:
+        m = _best_method(text)
+        if m and method_to_element.get(m):
+            forbidden.append(method_to_element[m])
+            continue
+        eid = _best_element(text)
+        if eid:
+            forbidden.append(eid)
+    # De-dupe while preserving order.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for eid in forbidden:
+        if eid and eid not in seen:
+            seen.add(eid)
+            ordered.append(eid)
+    return ordered
+
+
+# ---------------------------------------------------------------------------
 # Cache
 # ---------------------------------------------------------------------------
 
@@ -266,6 +396,13 @@ def _heal_one(
     intent = ""
     issues: list[str] = []
 
+    forbidden_ids = _compute_forbidden_ids(
+        stub=stub,
+        settings=settings,
+        pom_methods=pom_methods,
+        elements=elements,
+    )
+
     if cached is not None:
         suggested = cached.get("body", "")
         intent = cached.get("intent", "")
@@ -279,6 +416,13 @@ def _heal_one(
             cache_path=str(cache_path),
         )
     else:
+        if forbidden_ids:
+            logger.info(
+                "heal_forbidden_ids",
+                slug=stub.slug,
+                func=stub.function_name,
+                ids=",".join(forbidden_ids),
+            )
         user_prompt = build_heal_prompt(
             step_text=stub.step_text,
             keywords=stub.keywords,
@@ -287,6 +431,7 @@ def _heal_one(
             pom_methods=pom_methods,
             elements=elements,
             page_url=page_url,
+            forbidden_element_ids=forbidden_ids,
         )
         try:
             raw = client.chat_json(
@@ -311,7 +456,10 @@ def _heal_one(
         fixture_name=stub.fixture_name,
         pom_method_names=pom_method_names,
         element_ids={e.get("id", "") for e in elements if e.get("id")},
+        forbidden_element_ids=set(forbidden_ids),
+        current_page_url=page_url,
     )
+    cache_written = False
     if val_errors:
         for msg in val_errors:
             logger.warn(
@@ -322,25 +470,23 @@ def _heal_one(
                 body=suggested[:80],
             )
         issues.extend(val_errors)
-        # Still cache the raw response so the user can inspect it; the
-        # cache stores both body + the validation errors so a rerun
-        # without --force does not re-spend tokens on a known-bad output.
+        # Fallback: substitute `pass` so the test still runs without
+        # emitting a false assertion. Leaving the original
+        # NotImplementedError in place would guarantee the scenario
+        # fails at runtime even though the LLM's only mistake was
+        # picking a forbidden id / trivial URL — the correct behavior
+        # there is to just not assert anything.
+        cleaned = "pass  # no safe binding — validator rejected LLM output"
+        intent = intent or "no safe binding (validator fallback)"
         if cached is None:
             _write_cache(
                 cache_path,
-                {"body": suggested, "intent": intent, "errors": val_errors},
+                {"body": cleaned, "intent": intent, "errors": val_errors},
             )
-        return HealResult(
-            stub=stub,
-            suggested_body=suggested,
-            intent=intent,
-            applied=False,
-            cached=cached is not None,
-            issues=issues,
-        )
+            cache_written = True
 
     # Persist the validated cache entry so reruns are free.
-    if cached is None:
+    if cached is None and not cache_written:
         _write_cache(cache_path, {"body": cleaned, "intent": intent, "errors": []})
 
     if opts.dry_run:

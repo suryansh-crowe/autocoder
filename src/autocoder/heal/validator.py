@@ -66,6 +66,8 @@ def validate_body(
     pom_method_names: set[str],
     element_ids: set[str] | None = None,
     max_statements: int = 1,
+    forbidden_element_ids: set[str] | None = None,
+    current_page_url: str | None = None,
 ) -> tuple[str, list[str]]:
     """Return (cleaned_body, errors). Empty errors → body is safe.
 
@@ -115,9 +117,30 @@ def validate_body(
     # catalogue, because those crash at runtime with KeyError.
     errors: list[str] = []
     element_lookups = {"locate", "click", "check", "fill", "select"}
+    forbidden = forbidden_element_ids or set()
     for stmt in tree.body:
         for call in _walk_calls(stmt):
             target = call.func
+            # Reject `expect(<fixture>.page).to_have_url(<current_page_url>)`
+            # — the LLM keeps emitting this against the page we extracted
+            # from, which is trivially true at scenario start and wrong
+            # after any nav. We detect by matching `.to_have_url(<str>)`
+            # calls whose literal equals `current_page_url`.
+            if (
+                current_page_url
+                and isinstance(target, ast.Attribute)
+                and target.attr == "to_have_url"
+                and call.args
+                and isinstance(call.args[0], ast.Constant)
+                and isinstance(call.args[0].value, str)
+                and call.args[0].value.rstrip("/") == current_page_url.rstrip("/")
+            ):
+                errors.append(
+                    f"trivial assertion: to_have_url({current_page_url!r}) equals "
+                    "the current page_url — not a meaningful consequence. Emit "
+                    "`pass` instead when the target URL is unknown."
+                )
+                continue
             if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
                 obj = target.value.id
                 attr = target.attr
@@ -141,6 +164,13 @@ def validate_body(
                                 f"{fixture_name}.{attr}(...) — must be one of "
                                 f"the keys in SELECTORS ({sorted(element_ids)[:6]}"
                                 f"{'...' if len(element_ids) > 6 else ''})"
+                            )
+                        elif first.value in forbidden:
+                            errors.append(
+                                f"forbidden element_id {first.value!r} — it was "
+                                "acted on by a prior step in the same scenario. "
+                                "Pick a different id (a consequence element) or "
+                                "emit `pass`."
                             )
 
     if errors:

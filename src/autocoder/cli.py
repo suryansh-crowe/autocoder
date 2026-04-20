@@ -448,7 +448,27 @@ def heal(
     is_flag=True,
     help="Emit the report as machine-readable JSON on stdout instead of rich tables.",
 )
-def report(run_pytest_flag: bool, as_json: bool) -> None:
+@click.option(
+    "--html",
+    "html_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write a standalone HTML dashboard to this path (open in a browser). "
+    "Shows the same coverage + pass/fail data as the terminal view.",
+)
+@click.option(
+    "--open/--no-open",
+    "open_html",
+    default=True,
+    show_default=True,
+    help="When writing HTML, automatically open it in the default browser.",
+)
+def report(
+    run_pytest_flag: bool,
+    as_json: bool,
+    html_path: Path | None,
+    open_html: bool,
+) -> None:
     """Consolidated coverage + execution report.
 
     Shows, per URL:
@@ -475,6 +495,15 @@ def report(run_pytest_flag: bool, as_json: bool) -> None:
         log_file=str(logger.active_log_path() or ""),
     )
     data = build_report(settings, run_pytest=run_pytest_flag)
+    if html_path is not None:
+        from autocoder.report import render_html_report
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+        html_path.write_text(render_html_report(data), encoding="utf-8")
+        logger.ok("report_html_written", path=str(html_path))
+        _console.print(f"[cyan]HTML report:[/] {html_path}")
+        if open_html:
+            import webbrowser
+            webbrowser.open(html_path.resolve().as_uri())
     if as_json:
         import json as _json
         payload = {

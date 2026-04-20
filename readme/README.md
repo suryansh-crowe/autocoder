@@ -39,6 +39,7 @@ finish in a few minutes.
 | 14 | [extending.md](14_extending.md) | Adding selector strategies, tiers, or models |
 | 15 | [logging.md](15_logging.md) | Log levels, token accounting, decision events, redaction rules |
 | 17 | [heal.md](17_heal.md) | `autocoder heal` — fill stubs + heal runtime test failures |
+| 18 | [cleanup.md](18_cleanup.md) | Start from zero — one-shot commands to wipe generated artifacts + auth session |
 
 ## Run reports
 

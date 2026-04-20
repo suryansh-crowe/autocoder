@@ -58,7 +58,8 @@
       "Bash(python -c \"from autocoder.llm.prompts import build_feature_prompt, build_ui_inventory, FEATURE_SYSTEM; from autocoder.report import build_report, ReportData; from autocoder.cli import cli; print\\('ok'\\)\")",
       "Bash(python -c \"from autocoder.generate.steps import render_steps, _try_synthesize, _best_element_match; print\\('ok'\\)\")",
       "Bash(python -m autocoder.cli report --help)",
-      "Bash(python -m autocoder.cli report)"
+      "Bash(python -m autocoder.cli report)",
+      "Bash(python -m autocoder.cli report --html manifest/report.html --no-open)"
     ]
   },
   "disabledMcpjsonServers": [

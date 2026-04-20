@@ -39,7 +39,26 @@ Hard rules:
 - For "I am on the X page" / "I navigate to X" -> always pom.navigate().
 - For "X is visible" / "I should see X" -> expect(pom.locate('<id>')).to_be_visible().
 - For "I should be on X" / "I should be redirected to X" -> expect(pom.page).to_have_url(...).
-- When unsure, output {"body": "pass", "intent": "no safe binding"}.
+
+CONSEQUENCE RULES (very important — these are what make the tests meaningful):
+- `page_url` in the payload is the URL this page was EXTRACTED from. It is
+  NOT necessarily where the scenario ends up. **Never emit
+  `expect(<fixture>.page).to_have_url(<page_url>)`** — that is either
+  trivially true (before navigation) or wrong (after navigation). If the
+  step asserts arrival on a DIFFERENT page and you don't have the target
+  URL, output `{"body": "pass", "intent": "no target url known"}`.
+- `forbidden_element_ids` lists element ids that PRIOR When/And steps in
+  this scenario already clicked/filled. You MUST NOT emit an assertion
+  against any id in that list — asserting visibility of the element you
+  just acted on is not a meaningful consequence test. If only forbidden
+  ids would match, output `{"body": "pass", "intent": "no safe binding"}`.
+- For assertion steps ("X is displayed", "X panel is visible", "results
+  are shown"), prefer element ids whose name/role clearly matches the
+  Then-step subject and is NOT in `forbidden_element_ids`. A search
+  scenario's Then should reference a row / pagination / list id, not
+  the search box or filter button the scenario already used.
+
+When unsure, output {"body": "pass", "intent": "no safe binding"}.
 """
 
 
@@ -52,6 +71,7 @@ def build_heal_prompt(
     pom_methods: list[dict],
     elements: list[dict],
     page_url: str | None,
+    forbidden_element_ids: Iterable[str] = (),
 ) -> str:
     payload = {
         "step_text": step_text,
@@ -59,11 +79,13 @@ def build_heal_prompt(
         "pom_class": pom_class,
         "pom_fixture": fixture_name,
         "page_url": page_url or "",
+        "forbidden_element_ids": list(forbidden_element_ids),
         "pom_methods": pom_methods,
         "elements": elements,
     }
     return (
-        "Write the body for this Gherkin step.\n\n"
+        "Write the body for this Gherkin step. Obey the forbidden ids / "
+        "URL rules; prefer a consequence element over the action target.\n\n"
         + json.dumps(payload, separators=(",", ":"))
     )
 

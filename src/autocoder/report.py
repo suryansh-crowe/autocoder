@@ -15,10 +15,12 @@ it up in :mod:`autocoder.cli`.
 
 from __future__ import annotations
 
+import html as _html
 import json
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from autocoder import logger
@@ -273,3 +275,182 @@ def build_report(settings: Settings, *, run_pytest: bool) -> ReportData:
         total_failed=total_fail,
         total_unknown=total_unknown,
     )
+
+
+# ---------------------------------------------------------------------------
+# HTML renderer
+# ---------------------------------------------------------------------------
+
+
+def _fmt_inventory_html(inv: dict) -> str:
+    if not inv:
+        return "<span class='muted'>-</span>"
+    chips: list[str] = []
+    labels = [
+        ("search", "search"),
+        ("chat", "chat"),
+        ("forms", "forms"),
+        ("nav", "nav"),
+        ("buttons", "buttons"),
+        ("choices", "choices"),
+        ("data", "data"),
+        ("pagination", "pagination"),
+        ("submits", "submits"),
+    ]
+    for key, label in labels:
+        val = inv.get(key)
+        if isinstance(val, list):
+            if val:
+                chips.append(
+                    f"<span class='chip chip-{key}'>{label}={len(val)}</span>"
+                )
+        elif isinstance(val, int) and val:
+            chips.append(f"<span class='chip chip-{key}'>{label}={val}</span>")
+    return "".join(chips) or "<span class='muted'>-</span>"
+
+
+_CSS = """
+:root {
+  --bg: #0f172a; --fg: #e2e8f0; --muted: #64748b;
+  --card: #1e293b; --border: #334155;
+  --pass: #22c55e; --fail: #ef4444; --unknown: #eab308;
+  --accent: #38bdf8;
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: 24px 32px; background: var(--bg); color: var(--fg);
+  font: 14px/1.5 -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+h1 { margin: 0 0 4px 0; font-size: 22px; letter-spacing: 0.3px; }
+.subtitle { color: var(--muted); margin-bottom: 24px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px; margin-bottom: 24px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  padding: 14px 16px; }
+.card .k { color: var(--muted); font-size: 12px; text-transform: uppercase;
+  letter-spacing: 0.5px; }
+.card .v { font-size: 22px; font-weight: 600; margin-top: 4px; }
+.pass { color: var(--pass); }
+.fail { color: var(--fail); }
+.unknown { color: var(--unknown); }
+table { width: 100%; border-collapse: collapse; background: var(--card);
+  border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+  margin-bottom: 24px; }
+th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border);
+  vertical-align: top; }
+th { background: #111827; color: var(--muted); font-weight: 500;
+  text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: rgba(56, 189, 248, 0.05); }
+.chip { display: inline-block; background: rgba(56, 189, 248, 0.15);
+  color: var(--accent); border: 1px solid rgba(56, 189, 248, 0.35);
+  padding: 2px 8px; border-radius: 999px; font-size: 11px; margin: 2px 4px 2px 0; }
+.chip-search { background: rgba(34, 197, 94, 0.15); color: var(--pass);
+  border-color: rgba(34, 197, 94, 0.35); }
+.chip-chat { background: rgba(245, 158, 11, 0.15); color: #f59e0b;
+  border-color: rgba(245, 158, 11, 0.35); }
+.chip-forms { background: rgba(244, 114, 182, 0.15); color: #f472b6;
+  border-color: rgba(244, 114, 182, 0.35); }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; }
+.badge-pass { background: rgba(34, 197, 94, 0.18); color: var(--pass); }
+.badge-fail { background: rgba(239, 68, 68, 0.18); color: var(--fail); }
+.badge-unknown { background: rgba(234, 179, 8, 0.18); color: var(--unknown); }
+.tier { display: inline-block; background: rgba(148, 163, 184, 0.15);
+  color: #cbd5e1; padding: 1px 8px; border-radius: 4px; font-size: 11px;
+  margin-right: 4px; font-family: ui-monospace, monospace; }
+.muted { color: var(--muted); }
+.err { color: #fca5a5; font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px; word-break: break-word; }
+.url { color: var(--muted); font-family: ui-monospace, monospace;
+  font-size: 12px; word-break: break-all; }
+"""
+
+
+def render_html_report(data: ReportData) -> str:
+    """Return a standalone HTML dashboard for :class:`ReportData`."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    pct = (
+        f"{100.0 * data.total_passed / data.total_scenarios:.1f}%"
+        if data.total_scenarios
+        else "-"
+    )
+
+    coverage_rows: list[str] = []
+    detail_rows: list[str] = []
+    for s in data.slugs:
+        p = sum(1 for sc in s.scenarios if sc.passed is True)
+        f = sum(1 for sc in s.scenarios if sc.passed is False)
+        u = sum(1 for sc in s.scenarios if sc.passed is None)
+        coverage_rows.append(
+            "<tr>"
+            f"<td><strong>{_html.escape(s.slug)}</strong><br>"
+            f"<span class='url'>{_html.escape(s.url)}</span></td>"
+            f"<td>{_fmt_inventory_html(s.inventory)}</td>"
+            f"<td>{len(s.scenarios)}</td>"
+            f"<td class='pass'>{p}</td>"
+            f"<td class='fail'>{f}</td>"
+            f"<td class='unknown'>{u}</td>"
+            "</tr>"
+        )
+        for sc in s.scenarios:
+            if sc.passed is True:
+                result = "<span class='badge badge-pass'>pass</span>"
+            elif sc.passed is False:
+                result = "<span class='badge badge-fail'>fail</span>"
+            else:
+                result = "<span class='badge badge-unknown'>unknown</span>"
+            tiers = "".join(
+                f"<span class='tier'>{_html.escape(t)}</span>" for t in sc.tiers
+            ) or "<span class='muted'>-</span>"
+            note = (
+                f"<div class='err'>{_html.escape(sc.error)}</div>"
+                if sc.error
+                else ""
+            )
+            detail_rows.append(
+                "<tr>"
+                f"<td>{_html.escape(s.slug)}</td>"
+                f"<td>{_html.escape(sc.title)}{note}</td>"
+                f"<td>{tiers}</td>"
+                f"<td>{result}</td>"
+                "</tr>"
+            )
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>autocoder test report</title>
+<style>{_CSS}</style>
+</head>
+<body>
+<h1>autocoder — end-to-end test report</h1>
+<div class="subtitle">Generated {now} · {len(data.slugs)} URLs · {data.total_scenarios} scenarios · pass rate {pct}</div>
+
+<section class="cards">
+  <div class="card"><div class="k">URLs</div><div class="v">{len(data.slugs)}</div></div>
+  <div class="card"><div class="k">Scenarios</div><div class="v">{data.total_scenarios}</div></div>
+  <div class="card"><div class="k">Passed</div><div class="v pass">{data.total_passed}</div></div>
+  <div class="card"><div class="k">Failed</div><div class="v fail">{data.total_failed}</div></div>
+  <div class="card"><div class="k">Unknown</div><div class="v unknown">{data.total_unknown}</div></div>
+  <div class="card"><div class="k">Pass rate</div><div class="v">{pct}</div></div>
+</section>
+
+<h2>Per-URL coverage</h2>
+<table>
+  <thead><tr><th>URL</th><th>Detected UI components</th><th>Scenarios</th><th>Pass</th><th>Fail</th><th>Unknown</th></tr></thead>
+  <tbody>
+{''.join(coverage_rows)}
+  </tbody>
+</table>
+
+<h2>Per-scenario results</h2>
+<table>
+  <thead><tr><th>Slug</th><th>Scenario</th><th>Tiers</th><th>Result</th></tr></thead>
+  <tbody>
+{''.join(detail_rows)}
+  </tbody>
+</table>
+</body>
+</html>
+"""
