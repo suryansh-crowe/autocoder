@@ -296,6 +296,17 @@ def run_generate(settings: Settings, opts: GenerateOptions) -> list[StageResult]
                     )
                     continue
 
+                # Liveness check on the shared session. Long LLM phases
+                # (POM + feature plans + autoheal) sit idle for minutes
+                # on phi4:14b CPU — enough time for the headed Chromium
+                # window to die (user closes it, Windows reaps it, OOM,
+                # etc.). Without this check, every URL after the first
+                # one fails instantly with "Target page, context or
+                # browser has been closed". When the session is dead we
+                # reopen a fresh one and let silent_reauth rehydrate
+                # MSAL from the still-valid storage_state on disk.
+                shared = _ensure_shared_alive(shared, settings, registry)
+
                 try:
                     result = _process_url(
                         node, registry, settings, store, client, opts, shared=shared
@@ -1513,6 +1524,76 @@ def _maybe_escalate_to_auth(
     return None
 
 
+def _is_session_alive(shared: BrowserSession | None) -> bool:
+    """Cheap probe to check whether the shared Playwright session is
+    still usable. Reads ``page.url`` — if the context, browser, or
+    page was closed behind our back, Playwright raises and we return
+    False.
+    """
+    if shared is None or shared.page is None:
+        return False
+    try:
+        _ = shared.page.url  # noqa: F841  — intentional probe
+    except Exception:
+        return False
+    try:
+        return not shared.page.is_closed()
+    except Exception:
+        return False
+
+
+def _ensure_shared_alive(
+    shared: BrowserSession | None,
+    settings: Settings,
+    registry: Registry,
+) -> BrowserSession | None:
+    """Return a live shared session; reopen if the existing one died.
+
+    The typical failure mode is: the pipeline extracts URL #1, spends
+    12-15 minutes running POM / feature / heal LLM calls (all CPU-
+    bound, no browser work), then comes back to extract URL #2 and
+    finds the Chromium window closed. This helper transparently
+    reopens the browser context from the still-valid storage_state on
+    disk so the remaining URLs don't all fail with "browser has been
+    closed".
+    """
+    if _is_session_alive(shared):
+        return shared
+    if registry.auth is None:
+        # No auth spec → no storage_state to restore. The initial
+        # shared context was opened without it; reopening the same way
+        # is fine.
+        logger.warn(
+            "shared_session_died_reopening",
+            reason="context_closed_between_urls",
+            with_storage=False,
+        )
+        return open_shared_session(settings, use_storage_state=False).__enter__()
+    logger.warn(
+        "shared_session_died_reopening",
+        reason="context_closed_between_urls",
+        with_storage=True,
+        hint=(
+            "reopening with storage_state so MSAL cookies + localStorage "
+            "are restored; silent_reauth will rehydrate sessionStorage "
+            "on the first extraction"
+        ),
+    )
+    try:
+        new_sess = open_shared_session(settings, use_storage_state=True).__enter__()
+        return new_sess
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "shared_session_reopen_failed",
+            err=str(exc)[:200],
+            hint=(
+                "could not reopen the browser; remaining URLs will skip. "
+                "Delete .auth/user.json and rerun if session was stale."
+            ),
+        )
+        return None
+
+
 def _storage_state_usable(settings: Settings) -> bool:
     sp = settings.paths.storage_state
     try:
@@ -1555,7 +1636,32 @@ def _settle_after_auth(
     if shared is None:
         return
     target = (settings.base_url or "").rstrip("/")
+    # Fallback when .env has no BASE_URL: derive the origin from the
+    # post-auth URL. For ``https://app.example.com/login?code=x`` that
+    # gives ``https://app.example.com`` — exactly what we want to nav
+    # to so the SPA boots on a real route instead of the 404 /login.
+    if not target and post_auth_url:
+        try:
+            from urllib.parse import urlparse as _urlparse
+            p = _urlparse(post_auth_url)
+            if p.scheme and p.netloc:
+                target = f"{p.scheme}://{p.netloc}"
+                logger.info(
+                    "auth_settle_target_from_post_auth",
+                    target=logger.safe_url(target),
+                    hint=(
+                        "BASE_URL is empty in .env; using the origin of "
+                        "the post-auth URL as the settle target."
+                    ),
+                )
+        except Exception:
+            pass
     if not target:
+        logger.warn(
+            "auth_settle_skipped",
+            reason="no_target_url",
+            hint="set BASE_URL in .env so settle-after-auth can nav off the OAuth return URL",
+        )
         return
     cur = post_auth_url or ""
     if target in cur and "/login" not in cur:
@@ -1963,14 +2069,35 @@ def _extract_detailed(
             # the authenticated view. We then re-navigate to the
             # originally-requested URL so the extraction runs against
             # real content.
-            if use_storage and _looks_auth_gated_quick(sess.page):
+            # Bounce detection: even if the SSO shell isn't visible
+            # via the quick check, a URL mismatch between ``node.url``
+            # and the post-goto final_url — where the final URL looks
+            # login-shaped — almost always means "the SPA's auth
+            # guard redirected us because MSAL hasn't hydrated yet".
+            # Force the silent-reauth path in that case too, not just
+            # on visual DOM evidence.
+            bounced_to_login = (
+                use_storage
+                and final_url
+                and node.url
+                and final_url.rstrip("/") != node.url.rstrip("/")
+                and looks_like_login_url(final_url)
+            )
+            needs_reauth = (
+                use_storage
+                and (bounced_to_login or _looks_auth_gated_quick(sess.page))
+            )
+            if needs_reauth:
                 logger.info(
                     "extract_silent_reauth_attempt",
                     slug=node.slug,
+                    bounced=bounced_to_login,
+                    final_url=logger.safe_url(final_url or ""),
                     hint=(
-                        "page still shows the SSO consent shell after "
-                        "loading storage_state; clicking the provider "
-                        "button to let MSAL hydrate sessionStorage"
+                        "page either bounced to a login-shaped URL or "
+                        "still shows the SSO consent shell after loading "
+                        "storage_state; clicking the provider button to "
+                        "let MSAL hydrate sessionStorage"
                     ),
                 )
                 if _silent_reauth(sess, node.url, settings):

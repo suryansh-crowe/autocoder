@@ -81,7 +81,9 @@
       "Bash(netstat -ano)",
       "Bash(powershell -Command 'Get-Process | Where-Object { $_.ProcessName -like '\\\\''*ollama*'\\\\'' } | Select-Object Id, ProcessName, Path')",
       "Bash(powershell -Command 'Get-Process | Where-Object { $_.ProcessName -like '\\\\''*ollama*'\\\\'' } | Stop-Process -Force')",
-      "Bash(docker start *)"
+      "Bash(docker start *)",
+      "Bash(sed -n '48,60p' manifest/logs/20260420-221944-run.log)",
+      "Bash(sed -n '95,115p' manifest/logs/20260420-221944-run.log)"
     ]
   },
   "disabledMcpjsonServers": [
