@@ -30,35 +30,88 @@ def _indent_for(lineno: int, lines: list[str]) -> str:
     return "    "
 
 
+def _body_line_range(source: str, function_name: str) -> tuple[int, int] | None:
+    """Return 1-based (start, end) inclusive line numbers of the body
+    of ``function_name``. End is the last line of the last statement
+    in the body. ``None`` when the function can't be located.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            if not node.body:
+                return None
+            start = node.body[0].lineno
+            last = node.body[-1]
+            end = getattr(last, "end_lineno", last.lineno) or last.lineno
+            return start, end
+    return None
+
+
 def apply_heal(stub: StubInfo, new_body: str) -> str:
     """Return the file's new contents with `stub` replaced by `new_body`.
+
+    Replaces the **entire current body** of ``stub.function_name`` —
+    from the first body line to the last — not just ``stub.body_lineno``.
+    This matters whenever a prior heal pass already expanded the body
+    into multiple lines; without a range-based replace the new body
+    gets inserted in front of the old one and the whole function
+    accumulates duplicate statements across runs.
 
     Raises ``ValueError`` if the resulting source no longer parses —
     in that case the caller must keep the original file untouched.
     """
     original = stub.file_path.read_text(encoding="utf-8")
     lines = original.splitlines(keepends=True)
-    line_idx = stub.body_lineno - 1
-    if line_idx < 0 or line_idx >= len(lines):
-        raise ValueError(f"body line {stub.body_lineno} out of range for {stub.file_path}")
 
-    indent = _indent_for(stub.body_lineno, lines)
-    eol = "\r\n" if lines[line_idx].endswith("\r\n") else "\n"
+    # Find the CURRENT range of the function's body. ``stub.body_lineno``
+    # is the line the scanner saw at scan time; if the file has since
+    # been rewritten (e.g. by a prior heal pass in this session) the
+    # range may have shifted, so we re-resolve from the current source.
+    rng = _body_line_range(original, stub.function_name)
+    if rng is None:
+        # Fall back to single-line replacement on the original line.
+        start_idx = stub.body_lineno - 1
+        if start_idx < 0 or start_idx >= len(lines):
+            raise ValueError(
+                f"body line {stub.body_lineno} out of range for {stub.file_path}"
+            )
+        end_idx = start_idx
+    else:
+        start_idx = rng[0] - 1
+        end_idx = rng[1] - 1
 
-    # `new_body` may itself be multi-line if ast.unparse produced one.
+    if start_idx < 0 or end_idx >= len(lines) or end_idx < start_idx:
+        raise ValueError(
+            f"body range {start_idx + 1}-{end_idx + 1} out of range "
+            f"for {stub.file_path}"
+        )
+
+    indent = _indent_for(start_idx + 1, lines)
+    eol = "\r\n" if lines[start_idx].endswith("\r\n") else "\n"
+
+    # ``new_body`` may itself be multi-line if ast.unparse produced one.
     # Indent each line consistently.
     new_lines = [indent + ln for ln in new_body.splitlines() if ln]
     if not new_lines:
         new_lines = [indent + "pass"]
     replacement = eol.join(new_lines) + eol
 
-    rebuilt = "".join(lines[:line_idx]) + replacement + "".join(lines[line_idx + 1 :])
+    rebuilt = (
+        "".join(lines[:start_idx])
+        + replacement
+        + "".join(lines[end_idx + 1 :])
+    )
 
     # Sanity check — never write a file that won't parse.
     try:
         ast.parse(rebuilt, filename=str(stub.file_path))
     except SyntaxError as exc:
-        raise ValueError(f"applied body broke parse of {stub.file_path}: {exc!s}") from exc
+        raise ValueError(
+            f"applied body broke parse of {stub.file_path}: {exc!s}"
+        ) from exc
 
     return rebuilt
 

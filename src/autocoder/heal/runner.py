@@ -762,6 +762,38 @@ def _heal_one_failure(
     intent = ""
     issues: list[str] = []
 
+    # Cache-staleness guard: if the cached body is ALREADY on disk
+    # (i.e. matches ``current_body``) and we're back here because
+    # that same body is failing with the same error again, the
+    # cache is wrong — bust it and re-ask the LLM. The typical
+    # shape is "LLM guessed a URL; test ran; URL was wrong; same
+    # failure re-surfaces in a later session". Without this bypass
+    # we would loop forever on the bad suggestion.
+    def _ast_norm(src: str) -> str:
+        import ast as _ast
+        import textwrap as _tw
+        try:
+            return _ast.unparse(_ast.parse(_tw.dedent(src).strip()))
+        except Exception:
+            return _tw.dedent(src).strip()
+
+    if cached is not None:
+        cached_body = _ast_norm(cached.get("body") or "")
+        cur_body_norm = _ast_norm(current_body or "")
+        if cached_body and cur_body_norm and cached_body == cur_body_norm:
+            logger.info(
+                "heal_fail_cache_busted",
+                slug=stub.slug,
+                func=stub.function_name,
+                reason="cached_body_is_currently_failing",
+                hint=(
+                    "the cached suggestion is already on disk and still "
+                    "failing with the same error — forcing a fresh LLM "
+                    "call instead of re-applying the known-bad body"
+                ),
+            )
+            cached = None
+
     if cached is not None:
         suggested = cached.get("body", "")
         intent = cached.get("intent", "")
@@ -811,7 +843,13 @@ def _heal_one_failure(
         pom_method_names=pom_method_names,
         element_ids={e.get("id", "") for e in elements if e.get("id")},
         max_statements=5,
+        # Failure heal gets the pytest error as context; the error
+        # message often carries the right URL, so we re-allow
+        # to_have_url(...) here. Stub heal still blocks it.
+        allow_url_assertions=True,
+        current_page_url=page_url,
     )
+    fail_cache_written = False
     if val_errors:
         for msg in val_errors:
             logger.warn(
@@ -821,18 +859,23 @@ def _heal_one_failure(
                 msg=msg,
                 body=suggested[:80],
             )
+        issues.extend(val_errors)
+        # Fallback: replace the broken on-disk body with `pass` so the
+        # test stops failing with AttributeError / wrong-URL noise on
+        # the next run. The intent comment records that the LLM output
+        # was rejected so a human can grep for it and decide how to
+        # hand-fix. Without this fallback the rejected heal just
+        # leaves the previous bad body in place forever.
+        cleaned = "pass  # no safe binding — failure-heal validator rejected LLM output"
+        intent = intent or "no safe binding (validator fallback)"
         if cached is None:
-            _write_cache(cache_path, {"body": suggested, "intent": intent, "errors": val_errors})
-        return HealResult(
-            stub=stub,
-            suggested_body=suggested,
-            intent=intent,
-            applied=False,
-            cached=cached is not None,
-            issues=val_errors,
-        )
+            _write_cache(
+                cache_path,
+                {"body": cleaned, "intent": intent, "errors": val_errors},
+            )
+            fail_cache_written = True
 
-    if cached is None:
+    if cached is None and not fail_cache_written:
         _write_cache(cache_path, {"body": cleaned, "intent": intent, "errors": []})
 
     if opts.dry_run:

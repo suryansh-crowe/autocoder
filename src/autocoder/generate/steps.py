@@ -422,9 +422,46 @@ def render_steps(
 
     # Per-step-text forbidden element ids — union of every element id
     # that was already acted on by a prior When/And step in any
-    # scenario this text participates in. The Then-step synthesizer
-    # uses this to avoid re-asserting the same element the scenario
-    # just clicked / filled.
+    # scenario this text participates in, PLUS every sibling element
+    # whose name shares a core token with the acted element. The
+    # sibling expansion catches the "Ask Stewie clicked → Then assert
+    # Open Stewie assistant visible" failure mode: those two buttons
+    # are both triggers for the same modal and both disappear when
+    # either is clicked, so once we act on one we should treat the
+    # other as an invalid Then target too.
+    def _id_name_tokens(eid: str) -> set[str]:
+        el = next((e for e in el_list if e.id == eid), None)
+        pool = " ".join(
+            str(x) for x in (eid, (el.name if el else "") or "", (el.role if el else "") or "")
+        ).lower()
+        # Keep tokens that carry content; drop noise shared across
+        # many names ("button", "sign", "open", "close", common verbs).
+        noise = {
+            "button", "link", "icon", "sign", "in", "out", "open", "close",
+            "show", "hide", "the", "of", "to", "and", "or", "a", "an",
+            "click", "view", "page", "home", "with",
+        }
+        import re as _re
+        return {
+            t for t in _re.findall(r"[a-z0-9]+", pool)
+            if len(t) > 2 and t not in noise
+        }
+
+    def _siblings_of(eid: str) -> set[str]:
+        core = _id_name_tokens(eid)
+        if not core:
+            return set()
+        out: set[str] = set()
+        for e in el_list:
+            if e.id == eid:
+                continue
+            other = _id_name_tokens(e.id)
+            # Require overlap on a distinguishing token (at least one
+            # shared token after noise removal).
+            if core & other:
+                out.add(e.id)
+        return out
+
     forbidden_by_text: dict[str, set[str]] = {}
     for scn in feature_plan.scenarios:
         acted: set[str] = set()
@@ -433,11 +470,14 @@ def render_steps(
                 forbidden_by_text.setdefault(step.text, set()).update(acted)
                 continue
             if step.pom_method and step.pom_method in method_to_element:
-                acted.add(method_to_element[step.pom_method])
+                target = method_to_element[step.pom_method]
+                acted.add(target)
+                acted.update(_siblings_of(target))
             else:
                 match = _best_element_match(_normalize(step.text or ""), el_list)
                 if match is not None:
                     acted.add(match.id)
+                    acted.update(_siblings_of(match.id))
 
     # Group by step text. Same text under multiple keywords becomes a
     # single function decorated with each keyword's decorator.

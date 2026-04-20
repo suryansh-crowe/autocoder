@@ -59,6 +59,24 @@ def _illegal_constructs(node: ast.AST) -> list[str]:
     return bad
 
 
+_ASSERTION_METHOD_PREFIXES = ("to_", "not_to_")
+_ASSERTION_LEAF_SUFFIXES = (
+    "visible", "hidden", "checked", "enabled", "disabled",
+    "focused", "empty", "attached", "in_viewport",
+    "have_text", "have_url", "have_title", "have_value",
+    "have_attribute", "have_class", "have_count", "have_css",
+    "have_id", "have_role", "have_js_property", "have_screenshot",
+    "contain_text", "contain_class",
+)
+
+
+def _looks_like_assertion(attr: str) -> bool:
+    if not any(attr.startswith(p) for p in _ASSERTION_METHOD_PREFIXES):
+        return False
+    tail = attr.split("_", 1)[1] if attr.startswith("to_") else attr.split("_", 2)[-1]
+    return any(attr.endswith(s) for s in _ASSERTION_LEAF_SUFFIXES)
+
+
 def validate_body(
     body_text: str,
     *,
@@ -68,6 +86,7 @@ def validate_body(
     max_statements: int = 1,
     forbidden_element_ids: set[str] | None = None,
     current_page_url: str | None = None,
+    allow_url_assertions: bool = False,
 ) -> tuple[str, list[str]]:
     """Return (cleaned_body, errors). Empty errors → body is safe.
 
@@ -121,11 +140,44 @@ def validate_body(
     for stmt in tree.body:
         for call in _walk_calls(stmt):
             target = call.func
-            # Reject `expect(<fixture>.page).to_have_url(<current_page_url>)`
-            # — the LLM keeps emitting this against the page we extracted
-            # from, which is trivially true at scenario start and wrong
-            # after any nav. We detect by matching `.to_have_url(<str>)`
-            # calls whose literal equals `current_page_url`.
+            # Guard A — block non-assertion methods chained onto an
+            # assertion, e.g. `expect(loc).to_be_visible().click()`.
+            # Playwright's Assertion methods return None (or
+            # PageAssertions / LocatorAssertions), not the underlying
+            # locator, so the trailing call crashes at runtime. The
+            # LLM sometimes produces this as a "do both" shortcut.
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Call)
+                and isinstance(target.value.func, ast.Attribute)
+                and _looks_like_assertion(target.value.func.attr)
+                and not _looks_like_assertion(target.attr)
+            ):
+                errors.append(
+                    f"illegal chain: .{target.value.func.attr}().{target.attr}() — "
+                    "Playwright assertions return None; write two "
+                    "statements (assert, then action) instead."
+                )
+                continue
+            # Guard B — in stub-heal mode (``allow_url_assertions=False``)
+            # reject every ``to_have_url(...)``. The stub-heal context
+            # does not carry target URLs, so any literal the LLM
+            # produces is a guess. Failure-heal ``allow_url_assertions=True``
+            # opts back in because the pytest error message usually
+            # carries the right URL.
+            if (
+                not allow_url_assertions
+                and isinstance(target, ast.Attribute)
+                and target.attr == "to_have_url"
+            ):
+                errors.append(
+                    "to_have_url(...) is not allowed in stub heal — the "
+                    "target URL is not in context, so any literal is a "
+                    "guess. Emit `pass` if the step asserts a URL change."
+                )
+                continue
+            # Legacy trivial-URL guard retained for failure-heal mode
+            # (where to_have_url is allowed but must not be the page_url).
             if (
                 current_page_url
                 and isinstance(target, ast.Attribute)

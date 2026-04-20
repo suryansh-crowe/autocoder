@@ -41,24 +41,38 @@ Hard rules:
 - For "I should be on X" / "I should be redirected to X" -> expect(pom.page).to_have_url(...).
 
 CONSEQUENCE RULES (very important — these are what make the tests meaningful):
-- `page_url` in the payload is the URL this page was EXTRACTED from. It is
-  NOT necessarily where the scenario ends up. **Never emit
-  `expect(<fixture>.page).to_have_url(<page_url>)`** — that is either
-  trivially true (before navigation) or wrong (after navigation). If the
-  step asserts arrival on a DIFFERENT page and you don't have the target
-  URL, output `{"body": "pass", "intent": "no target url known"}`.
-- `forbidden_element_ids` lists element ids that PRIOR When/And steps in
-  this scenario already clicked/filled. You MUST NOT emit an assertion
-  against any id in that list — asserting visibility of the element you
-  just acted on is not a meaningful consequence test. If only forbidden
-  ids would match, output `{"body": "pass", "intent": "no safe binding"}`.
+- **NEVER emit `expect(<fixture>.page).to_have_url(...)`.** You do not
+  know the URL of ANY page the scenario navigates to — the `page_url`
+  in your payload is the source page, not the destination. If the step
+  asserts arrival on a different page, output
+  `{"body": "pass", "intent": "target url unknown"}`.
+- **NEVER invent element ids.** You may ONLY emit
+  `<fixture>.locate('<id>')` where `<id>` is one of the strings in the
+  `elements[].id` list of your payload. If nothing in `elements` matches
+  the step's subject, output
+  `{"body": "pass", "intent": "no matching element id"}`. Do not
+  hallucinate ids like "validation_message", "error_banner",
+  "success_toast" — if the page does not expose that element at
+  extraction time, it cannot be asserted.
+- **NEVER chain methods after an assertion.** Playwright's
+  `Assertion` methods (`to_be_visible`, `to_have_url`, etc.) return
+  None, not the locator. If you need to assert then act, emit TWO
+  statements — but stub heal allows only one. For two statements, output
+  `{"body": "pass"}`.
+- **`forbidden_element_ids`** lists ids that PRIOR When/And steps already
+  clicked/filled OR that share a name token with such an id (likely
+  related triggers that also disappear). You MUST NOT emit an assertion
+  against any id in that list. If only forbidden ids match, output
+  `{"body": "pass", "intent": "no safe binding"}`.
 - For assertion steps ("X is displayed", "X panel is visible", "results
-  are shown"), prefer element ids whose name/role clearly matches the
-  Then-step subject and is NOT in `forbidden_element_ids`. A search
-  scenario's Then should reference a row / pagination / list id, not
-  the search box or filter button the scenario already used.
+  are shown"), pick an id whose name/role clearly matches the Then-step
+  subject and is NOT in `forbidden_element_ids`. A search scenario's
+  Then should reference a pagination control or list element, NOT the
+  search input or filter button.
 
-When unsure, output {"body": "pass", "intent": "no safe binding"}.
+When in doubt, `{"body": "pass", "intent": "no safe binding"}` is
+always the correct answer. A passing-with-intent stub is far better
+than a false assertion that fails at runtime.
 """
 
 

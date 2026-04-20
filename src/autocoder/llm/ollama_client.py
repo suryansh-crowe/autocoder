@@ -79,6 +79,15 @@ class OllamaClient:
         max_tokens: int | None = None,
         purpose: str = "unspecified",
     ) -> LLMResponse:
+        # Per-purpose tuning — heal calls produce 1-5 statements (~80
+        # tokens max), so a huge num_predict just lets the model
+        # ramble past a valid stop point, which can break `format=json`.
+        # Heal calls also benefit from greedy decoding (temperature 0)
+        # because we want the single highest-probability safe
+        # statement, not a sampled one.
+        is_heal = purpose.startswith("heal:") or purpose.startswith("heal_fail:")
+        effective_temp = 0.0 if is_heal else self._s.temperature
+        effective_max = max_tokens or (200 if is_heal else self._s.num_predict)
         payload: dict[str, Any] = {
             "model": self._s.model,
             "messages": [
@@ -88,9 +97,9 @@ class OllamaClient:
             "stream": True,
             "options": {
                 "num_ctx": self._s.num_ctx,
-                "temperature": self._s.temperature,
+                "temperature": effective_temp,
                 "top_p": self._s.top_p,
-                "num_predict": max_tokens or self._s.num_predict,
+                "num_predict": effective_max,
             },
         }
         if json_mode:
@@ -103,6 +112,7 @@ class OllamaClient:
             json_mode=json_mode,
             num_ctx=self._s.num_ctx,
             num_predict=payload["options"]["num_predict"],
+            temperature=payload["options"]["temperature"],
             sys_chars=len(system),
             user_chars=len(user),
             stream=True,
