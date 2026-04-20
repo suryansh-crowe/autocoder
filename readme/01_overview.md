@@ -106,11 +106,42 @@ two planning calls. Everything else is deterministic Python.
 - Generation quality gate: a URL whose step file still has
   `NotImplementedError` bodies ends up `needs_implementation`, not
   `complete`, and the run summary switches to `run_done_with_issues`.
-- **Heal stage** (`autocoder heal`) — fills the stubs via the LLM
-  with AST-validated single-statement bodies.
+- **Component-aware feature planning.** The feature-plan prompt
+  receives a `ui_inventory` summary computed from the extraction
+  (search boxes, chat/ask textboxes, nav links, forms, data
+  pagination, action buttons, choices) and instructs the model to
+  generate scenarios keyed to what actually exists on the page —
+  search queries for search boxes, chat prompts for message
+  textboxes, form validation + submission for forms, consequence
+  assertions for action buttons, etc. Then-steps must name a
+  *different* element than their When-step (prevents re-asserting
+  the action target).
+- **Inline `steps_autoheal` stage.** `run_generate` runs the LLM
+  heal pass immediately after the deterministic renderer. Any step
+  body the renderer left as `NotImplementedError` gets filled in
+  the same run, respecting the forbidden-ids rule (Then-steps can't
+  target elements earlier When-steps already acted on) and the
+  trivial-URL rule (no `to_have_url(current_page_url)`). Rejected
+  LLM bodies fall back to `pass  # no safe binding` so the test
+  still collects and runs.
+- **Heal stage** (`autocoder heal`) — fills remaining stubs outside
+  a run via the LLM with AST-validated single-statement bodies.
 - **Runtime-failure heal** (`autocoder heal --from-pytest`) — runs
   pytest, captures Playwright errors, asks the LLM for revised
   bodies (up to 5 statements so prerequisites are expressible).
+- **Pre-write syntax guard.** The rendered step module is
+  `ast.parse`d before it hits disk. If a bad plan ever produces
+  invalid Python (e.g. a literal arg joined as a bare identifier),
+  the orchestrator rewrites every body to a clean
+  `NotImplementedError` stub so pytest collection still succeeds —
+  and the auto-heal pass refills them on the same run.
+- **Standalone HTML report** (`autocoder report --html <path>`) —
+  dark-themed dashboard with per-URL UI component chips, per-
+  scenario pass/fail, and overall totals. `--run` invokes pytest
+  first. The dashboard is also regenerated automatically at the end
+  of every `pytest tests/steps` session via the conftest
+  `pytest_sessionfinish` hook (opt out with
+  `AUTOCODER_AUTOREPORT=false`).
 - Tracking and resume via `manifest/registry.yaml`. Per-URL
   failures don't abort the whole run — failed URLs are marked and
   the loop continues.

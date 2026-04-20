@@ -95,23 +95,77 @@ pytest tests/steps/test_login.py::test_user_signs_in_with_valid_credentials
 
 ## Reports
 
+### Built-in HTML dashboard (`autocoder report`)
+
+```bash
+autocoder report --run --html manifest/report.html     # run pytest, then write HTML
+autocoder report --html manifest/report.html           # reuse existing JUnit XML
+autocoder report --run --json > report.json            # machine-readable output
+```
+
+Produces a standalone, dark-themed HTML file showing, per URL:
+
+* detected **UI components** as coloured chips (search, chat, forms,
+  nav, buttons, choices, data, pagination) — computed from the
+  extraction by `build_ui_inventory()`;
+* **every scenario** with its tier tags and pass / fail / unknown
+  result;
+* **overall totals** and a pass rate.
+
+`--run` invokes pytest against every `tests/steps/test_*.py` and
+writes fresh `manifest/runs/<slug>.xml` first. Without `--run` the
+report reads whatever XML is already on disk (slugs that have
+never been tested show `unknown`). `--open/--no-open` controls
+whether the HTML file is opened in the default browser
+(`--open` by default when `--html` is used).
+
+### Automatic report after every `pytest` session
+
+`tests/conftest.py` ships two hooks that make plain `pytest` work
+the same way as `autocoder report --run`:
+
+* **`pytest_configure`** — if you didn't pass `--junit-xml`, it
+  auto-sets `--junit-xml=manifest/runs/_pytest_session.xml` so the
+  raw XML always exists.
+* **`pytest_sessionfinish`** — splits that XML into per-slug files
+  (`manifest/runs/<slug>.xml`) and regenerates
+  `manifest/report.html` using `autocoder.report.render_html_report`.
+  Prints `[autocoder-report] N slug(s) updated → <path>` at the
+  bottom of the pytest output.
+
+Opt out with `AUTOCODER_AUTOREPORT=false` in `.env` (useful for
+downstream consumers who only want to run the generated suite and
+don't have the `autocoder` package installed). Any explicit
+`--junit-xml=<path>` you pass is preserved; the hook only wires a
+default.
+
+### Third-party options
+
 `pytest --html=report.html --self-contained-html` (with
-`pytest-html`) produces a single-file HTML report. Playwright's
-own trace viewer (`npx playwright show-trace trace.zip`) opens
-captured traces from `--tracing on`.
+`pytest-html`) produces an alternative single-file HTML report.
+Playwright's own trace viewer (`npx playwright show-trace trace.zip`)
+opens captured traces from `--tracing on`.
 
 ## CI sketch
 
 ```yaml
 - run: pip install -r requirements.txt && playwright install chromium
-- run: autocoder rerun                 # regenerate against current app state
-- run: pytest tests/auth_setup -m auth_setup
-- run: pytest -m "smoke or regression"
+- run: autocoder rerun                              # regenerate against current app state
+- run: pytest tests/auth_setup -m auth_setup        # refresh .auth/user.json if needed
+- run: pytest -m "smoke or regression"              # execute suite (auto-report fires on finish)
+- run: autocoder report --html manifest/report.html # optional: rebuild the HTML with any extra JUnit
+- uses: actions/upload-artifact@v4
+  with:
+    name: autocoder-report
+    path: manifest/report.html
 ```
 
 `autocoder rerun` in CI catches selector drift early — if the app
 changed, the regenerated POM/features carry the new state and the
-tests still pass without manual intervention.
+tests still pass without manual intervention. `manifest/report.html`
+is produced automatically by the pytest run above; the explicit
+`autocoder report --html` line is only necessary if you disabled
+`AUTOCODER_AUTOREPORT`.
 
 ## Runtime self-heal on generated actions
 

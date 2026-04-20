@@ -21,9 +21,19 @@ manifest/
   heals/<slug>.<key>.json           cached stub-heal suggestions
   heals/<slug>.fail.<key>.json      cached failure-heal suggestions
   heals/last-pytest.xml             JUnit XML from `heal --from-pytest`
-  runs/<slug>.xml                   JUnit XML from `autocoder run`'s
-                                    per-slug pytest invocation (updated on
-                                    every verification pass in the heal loop)
+  runs/<slug>.xml                   JUnit XML per slug — written by
+                                    `autocoder run`'s per-slug pytest
+                                    invocation AND by the `pytest_sessionfinish`
+                                    hook in `tests/conftest.py` that splits the
+                                    merged session XML per slug
+  runs/_pytest_session.xml          Merged JUnit XML from the last pytest run
+                                    (input to the per-slug split above; auto-
+                                    set via `pytest_configure` when no
+                                    `--junit-xml` is on the CLI)
+  report.html                       Standalone HTML dashboard — component chips
+                                    per URL, per-scenario pass/fail, totals.
+                                    Written by `autocoder report --html` and by
+                                    the pytest auto-report hook
   logs/<YYYYMMDD-HHMMSS>-<cmd>.log
                         per-invocation newline-delimited JSON log
                         (one file per `autocoder ...` command)

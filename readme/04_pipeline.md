@@ -58,9 +58,17 @@ deterministic.
 │   ─ RUNS THE LOGIN in-process (auth_runner). Password is only  │
 │     required for inline-form login; SSO modes accept username- │
 │     only and wait up to AUTH_INTERACTIVE_TIMEOUT_MS (default   │
-│     300s headed / 90s headless) for interactive MFA completion │
-│   ─ writes .auth/user.json ONLY after _wait_success confirms   │
-│     the page left login.microsoftonline.com and /login         │
+│     45 s for both headed and headless) for interactive MFA     │
+│   ─ _unblock_sso_button polls visible consent checkboxes for   │
+│     up to 15 s (handles reactive SPAs); SSO click failures     │
+│     log a hint and fall through to _wait_success instead of    │
+│     aborting the runner                                        │
+│   ─ writes .auth/user.json after _wait_success sees any of:    │
+│     URL outside login.microsoftonline.com + /login, MSAL       │
+│     tokens in sessionStorage/localStorage, OR a proactive nav  │
+│     to base_url succeeding (for apps whose redirect_uri is a   │
+│     404 /login route). Scans every page in the context so      │
+│     popup-based auth is captured too.                          │
 │   ─ on success, stale-marks every non-LOGIN node so the next   │
 │     pass re-extracts under the session                         │
 │   ─ on awaiting_external_completion, persists any cookies the  │
@@ -144,14 +152,38 @@ deterministic.
 │                   (Gherkin, tier→tag mapping)                  │
 │   steps.py      → tests/steps/test_<slug>.py                   │
 │                   (pytest-bdd; one decorator per unique step;  │
-│                    body = pom_method call OR synthesized       │
+│                    body = pom_method call with literal args    │
+│                    repr'd as Python strings, OR synthesized    │
 │                    Playwright call for navigation/assertion/   │
-│                    negation patterns OR NotImplementedError    │
-│                    when neither fits)                          │
+│                    negation patterns (Then-steps avoid element │
+│                    ids that prior When-steps acted on), OR     │
+│                    NotImplementedError when neither fits)      │
+│   ─ pre-write guard: ast.parse() the rendered module; if it    │
+│     does not parse, _strip_step_bodies_for_heal rewrites every │
+│     body to NotImplementedError so pytest collection succeeds  │
 │   ─ quality gate: count NotImplementedError in the rendered    │
 │     file. > 0 → node.status = NEEDS_IMPLEMENTATION; the run    │
 │     summary surfaces it via run_done_with_issues               │
 │   ─ tokens      0                                              │
+└────────────────────────────────────────────────────────────────┘
+                          │
+           placeholder_count > 0 and client available?
+                          │
+                          ▼ (skipped when 0 placeholders)
+┌────────────────────────────────────────────────────────────────┐
+│ 7b. STEPS_AUTOHEAL   autocoder/heal/runner.py (inline)         │
+│   ─ invoked by orchestrator._process_url right after the       │
+│     steps write; same heal_steps(settings, HealOptions(slug))  │
+│     the standalone `autocoder heal` command uses               │
+│   ─ for each stub: feature-file is parsed for the scenario     │
+│     that owns the step, prior When/And action targets become   │
+│     `forbidden_element_ids`; the heal LLM must not re-assert   │
+│     those, and must not emit `to_have_url(current_page_url)`   │
+│   ─ rejected bodies fall back to `pass  # no safe binding` so  │
+│     the test still runs without emitting a false assertion     │
+│   ─ tokens      ~250 in / ~30 out per stub (cached thereafter) │
+│   ─ events      steps_autoheal, heal_forbidden_ids,            │
+│                 heal_applied, steps_autoheal_done              │
 └────────────────────────────────────────────────────────────────┘
                           │
                           ▼
@@ -180,9 +212,11 @@ deterministic.
 | 5. POM render  | `autocoder/generate/pom.py`         | 0                  | `tests/pages/<slug>_page.py` |
 | 6. Feature plan| `autocoder/llm/plans.py`            | ~350 in / ~180 out | `manifest/plans/*.feature.<tiers>.<fp>.json` |
 | 7a. Feature    | `autocoder/generate/feature.py`     | 0                  | `tests/features/<slug>.feature` |
-| 7b. Steps      | `autocoder/generate/steps.py`       | 0                  | `tests/steps/test_<slug>.py` (+ quality gate) |
+| 7b. Steps      | `autocoder/generate/steps.py`       | 0                  | `tests/steps/test_<slug>.py` (+ quality gate + pre-write `ast.parse` guard) |
+| **7c. Autoheal (inline)** | `autocoder/heal/runner.py` | ~250 in / ~30 out per stub (cached after first hit) | Replaces `NotImplementedError` stubs with validated one-statement LLM bodies right inside `run_generate`; respects `forbidden_element_ids` + trivial-URL rule |
 | 8. Persist     | `autocoder/registry/`               | 0                  | `registry.yaml` + `manifest/logs/<ts>-<cmd>.log` |
-| **9. Heal (optional)** | `autocoder/heal/`           | ~250 in / ~30 out per stub; ~400 / ~80 per failure | Step bodies in `tests/steps/test_<slug>.py` (stub fill or runtime-failure revision) |
+| **9. Heal (standalone)** | `autocoder/heal/`         | ~250 in / ~30 out per stub; ~400 / ~80 per failure | Reruns the same heal flow out-of-band via `autocoder heal` / `autocoder heal --from-pytest` |
+| **10. Report (on demand)** | `autocoder/report.py`   | 0                  | `manifest/report.html` + `manifest/runs/<slug>.xml` when `--run` / `--html` is used, or automatically via the `pytest_sessionfinish` hook in `tests/conftest.py` |
 
 ## Verification + heal loop (`autocoder run` only)
 

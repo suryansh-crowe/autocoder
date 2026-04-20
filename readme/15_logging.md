@@ -127,16 +127,22 @@ events when you want to know "why?":
 | `ollama_json_retry` / `ollama_json_recovered` / `ollama_json_parse_failed` | JSON recovery ladder progress; the `recovered` case means the strict-prompt retry parsed successfully. |
 | `feature_plan_fallback`       | `OllamaError` on the feature plan was caught; a minimal `FeaturePlan` was substituted so the POM + steps still render. |
 | `pom_written` / `feature_written` / `steps_written` | `action=created` vs. `action=updated`, plus counts. `steps_written` additionally carries `status` (`complete` / `needs_implementation`) and `placeholders` count. |
+| `steps_syntax_error`          | Rendered module failed `ast.parse` before writing; `_strip_step_bodies_for_heal` rewrote every body to `NotImplementedError`. |
+| `steps_write_aborted`         | Stripped fallback also failed to parse; node marked `failed` and nothing written. |
 | `steps_incomplete`            | Quality gate fired: the rendered step file still has ≥ 1 placeholder body. |
+| `steps_autoheal` / `steps_autoheal_done` / `steps_autoheal_failed` | Orchestrator's inline LLM heal pass that runs right after rendering. `done` carries `stubs`, `applied`, `remaining_placeholders`. |
 | `run_done` / `run_done_with_issues` | Terminal summary. `run_done_with_issues` is used whenever any URL ended up `needs_implementation` or `failed`. |
 | `urls_source`                 | Which URL source the CLI used (`cli` / `file:…` / `env` / `settings`). |
 | `url_skipped`                 | Why an in-order URL was skipped (e.g. `login_url_covered_by_auth_setup`). |
 | `url_failed`                  | A URL's processing raised; logged with `err_type` so the run keeps going. |
 | `heal_context_loaded`         | Per-slug POM methods + element catalog the heal LLM will see. |
+| `heal_forbidden_ids`          | Element ids (per stub) that prior When/And steps in the same scenario acted on — the heal LLM is forbidden from asserting against these. |
 | `heal_dry_run` / `heal_applied` | What the LLM proposed and whether it was written. |
-| `heal_invalid_body`           | Why a suggestion was rejected (validator reason). |
+| `heal_invalid_body`           | Why a suggestion was rejected — includes the trivial-URL rule (`to_have_url(current_page_url)`) and the forbidden-id rule. Rejected bodies now fall back to `pass  # no safe binding` instead of leaving the NotImplementedError in place. |
 | `heal_apply_failed`           | Generated source did not re-parse; original kept untouched. |
 | `heal_pytest_run` / `heal_failures_collected` | `--from-pytest` invocation + parsed failure count. |
+| `report_pytest_run` / `report_pytest_failed` / `report_pytest_skipped_missing` | `autocoder report --run` per-slug pytest status. |
+| `report_html_written`         | HTML dashboard path written by `autocoder report --html`. |
 
 ## Stage markers
 

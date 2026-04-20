@@ -131,7 +131,13 @@ def _the_sign_in_button_for_microsoft_should_be_disable(stewie_page: StewiePage)
   previous step's keyword as Gherkin specifies.
 - If the validated step has a `pom_method` AND the step text supplies
   values for every parameter the method requires, the body calls
-  `fixture.<pom_method>(...args)`.
+  `fixture.<pom_method>(...args)`. Arguments are rendered in two
+  classes: values captured from the step text by `parsers.parse`
+  (they are Python identifiers — emitted verbatim) and literal
+  values from the feature plan's `step.args` array (they are Python
+  strings — `repr()`'d into the call). This prevents bare
+  identifiers like `fill_search_assets(customer data)` (a
+  SyntaxError) when the plan passes `"customer data"` as a literal.
 - If the step has a `pom_method` but supplies no values for a
   required parameter, the body raises
   `NotImplementedError("...expects: <param>")` instead of emitting a
@@ -141,8 +147,19 @@ def _the_sign_in_button_for_microsoft_should_be_disable(stewie_page: StewiePage)
   to `NotImplementedError`.
 - Quoted segments inside step text become `parsers.parse` arguments
   (`"foo"` → `arg0`).
-- The remaining stubs are filled in by the **heal stage**
-  (`autocoder heal`). See `17_heal.md`.
+- For Then steps, synthesis refuses to point at element ids that
+  earlier When/And steps in the same scenario already acted on
+  (`forbidden_ids`). Instead of emitting a meaningless
+  `expect(same_button).to_be_visible()` after the button was just
+  clicked, the renderer falls through to `NotImplementedError` so
+  the heal LLM can pick a different element — the chat panel
+  that opened, the heading that appeared, the pagination that
+  materialised.
+- The remaining stubs are filled in by the **inline autoheal pass**
+  that `run_generate` runs right after rendering (same code as
+  `autocoder heal`, see `17_heal.md`). Rejected LLM bodies become
+  `pass  # no safe binding — validator rejected LLM output` so the
+  test still collects and runs.
 
 ### Step synthesis (`_try_synthesize`)
 
@@ -187,6 +204,20 @@ method list and picks a body in this order:
    element but state no specific assertion → `expect(loc).to_be_visible()`.
 
 Fall-through: `raise NotImplementedError("Implement step: …")`.
+
+### Pre-write syntax guard
+
+Immediately before `tests/steps/test_<slug>.py` is written, the
+orchestrator runs `ast.parse()` on the rendered string. A single
+bad step — e.g. a literal argument joined as a bare identifier —
+would otherwise make the whole module un-collectable and block
+pytest for *every* slug. When the parse fails,
+`_strip_step_bodies_for_heal` rewrites every step function body
+to `raise NotImplementedError("Implement step: <text>")` (a
+parseable shape the auto-heal scanner recognizes). The next
+inline-heal pass refills those bodies via the LLM. If even the
+stripped rewrite fails to parse, the node is marked `failed`
+instead of writing garbage.
 
 ### Placeholder quality gate
 

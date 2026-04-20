@@ -304,6 +304,30 @@ Both heal prompts share the same validator
 `max_statements=5` so a fix like
 `pom.locate('agreement').check(); pom.click_submit()` is allowed.
 
+### Heal prompt consequence rules
+
+Both stub and failure heal prompts carry two new context fields
+that constrain the LLM's output:
+
+* **`forbidden_element_ids`** — element ids that prior When/And
+  steps in the same scenario already clicked or filled. Computed
+  by parsing the `tests/features/<slug>.feature` file
+  (`_scenario_prior_step_texts`) and fuzzy-matching each prior
+  step text to a POM method's `element_id` or the extraction
+  catalog (`_compute_forbidden_ids` in `heal/runner.py`). The LLM
+  MUST NOT emit an assertion against any of those ids —
+  re-asserting the action target is not a meaningful consequence
+  test. The validator enforces this; rejected bodies fall back to
+  `pass  # no safe binding`.
+* **`page_url`** — the URL the extraction was done from. The
+  system prompt explicitly forbids
+  `expect(<fixture>.page).to_have_url(<page_url>)` because it is
+  either trivially true (before navigation) or wrong (after
+  navigation). When the step asserts arrival on a different page
+  and no target URL is known, the LLM must emit
+  `{"body": "pass", "intent": "no target url known"}`. The
+  validator rejects the trivial form too.
+
 ### POM plan (stage 4)
 
 System prompt (~120 tokens) sets the output schema and rules:
@@ -354,23 +378,57 @@ Output is typically ~120 tokens.
 
 ### Feature plan (stage 6)
 
-System prompt (~150 tokens) defines the schema for Gherkin features
-and constrains scenario tiers + step counts.
+System prompt (~400 tokens — the big one) defines the schema for
+Gherkin features and now carries **component-aware coverage rules**.
+Each interactive surface type the page exposes must produce a
+dedicated scenario, and each absent type must not. Heuristics:
 
-User prompt (~250-350 tokens) is again a JSON envelope:
+| Inventory field | Scenario the plan MUST include |
+|-----------------|--------------------------------|
+| `search` > 0    | Typed query → results indicator (rows / pagination / list); plus an empty-query validation scenario |
+| `chat` > 0      | Prompt text → response / message area visible |
+| `forms` > 0     | Valid submission + invalid / empty submission (validation) |
+| `nav` > 0       | Click a nav link/tab → URL change or landmark heading for that target |
+| `buttons` > 0   | Action button click → *consequence* assertion (dialog, toast, new panel) |
+| `choices` > 0   | Toggle a checkbox/radio → dependent element becomes enabled/visible |
+| `data` > 0      | Open a row OR sort/filter the table → detail or updated list visible |
+
+The prompt also enforces a **Then-step quality** rule: every Then
+step must describe a *consequence*, not the action target. "User
+clicks Open assistant → Then the Open assistant button is visible"
+is explicitly banned; the Then subject must name a different
+element id (the chat panel, an Ask Stewie textbox, a new heading).
+
+User prompt (~250-400 tokens) is a JSON envelope:
 
 ```json
 {
-  "url": "https://app.example.com/login",
-  "title": "Sign in",
-  "headings": ["Sign in"],
-  "pom_methods": ["fill_email", "fill_password", "click_submit"],
+  "url": "https://app.example.com/catalog",
+  "title": "Catalog",
+  "headings": ["Catalog"],
+  "pom_methods": ["click_filter", "fill_search_assets", "click_home"],
   "elements": [...],
-  "tiers": ["smoke", "happy", "validation"]
+  "tiers": ["smoke", "happy", "validation"],
+  "ui_inventory": {
+    "search":  ["search_assets"],
+    "chat":    [],
+    "nav":     ["home", "close_sidebar"],
+    "data":    [],
+    "pagination": ["previous", "_1", "next"],
+    "buttons": ["ask_stewie", "data_catalog", "source_connection", ...],
+    "choices": [],
+    "submits": [],
+    "forms":   0,
+    "headings": ["Catalog"]
+  }
 }
 ```
 
-Output is typically ~180 tokens.
+The inventory is computed by
+`autocoder/llm/prompts.py:build_ui_inventory(extraction)` from the
+extraction alone — no extra LLM cost. Output is typically
+~350-700 tokens (up from 180) because the model now emits 3-8
+scenarios instead of 2-6 when the page warrants it.
 
 ## Validation
 

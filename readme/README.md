@@ -7,14 +7,20 @@ while keeping the LLM's role to a single tiny JSON action plan per
 stage.
 
 **Start here:** `autocoder run <urls>` is the single command most
-users want. It generates the suite, runs pytest, invokes
-`heal --from-pytest` for anything that fails at runtime, and loops
-up to `--max-heal-attempts` passes (default 3) before reporting a
-final per-URL state of `verified` / `needs_implementation` / `failed`.
+users want. It generates the suite (running the LLM-backed auto-heal
+pass inline so every recommended scenario gets an executable body),
+runs pytest when `--verify` is passed, invokes `heal --from-pytest`
+for anything that fails at runtime, and loops up to
+`--max-heal-attempts` passes (default 3) before reporting a final
+per-URL state of `verified` / `needs_implementation` / `failed`.
 Exits non-zero when any URL is still failing, so CI catches it.
 
 `autocoder generate` and the separate `autocoder heal` commands
-remain available for offline / fine-grained workflows.
+remain available for offline / fine-grained workflows. After a run,
+`autocoder report --html manifest/report.html` renders a browser-
+viewable dashboard with per-URL component detection, per-scenario
+pass/fail, and overall totals — also regenerated automatically at
+the end of every `pytest tests/steps` session.
 
 ## Reading order
 

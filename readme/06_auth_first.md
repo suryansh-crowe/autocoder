@@ -73,10 +73,18 @@ saves the resulting `storage_state` to `settings.paths.storage_state`
 Dispatch per mode:
 
 - **`form`** — fill username, fill password, click submit.
-- **`sso_microsoft`** — click the provider button; follow the redirect
-  (or the popup) to `login.microsoftonline.com`; fill `loginfmt`, click
-  Next, then *best-effort* fill `passwd` if (a) the password input
-  appears within 15s and (b) `LOGIN_PASSWORD` is configured. If either
+- **`sso_microsoft`** — poll the app's consent checkbox until the
+  "Sign in with Microsoft" button is enabled (up to 15 s — reactive
+  SPAs often mount the checkbox *after* the first frame, so a one-
+  shot tick at page-load time misses it). Then click the button.
+  If the click still fails (disabled custom control, modal overlay,
+  etc.) the runner logs a clear hint, tries a JS-level
+  `el.click()` fallback, and **falls through to `_wait_success`**
+  rather than aborting — you can tick the consent and click Sign
+  in yourself in the visible browser, and the session still gets
+  captured. After the redirect, fill `loginfmt`, click Next, then
+  *best-effort* fill `passwd` if (a) the password input appears
+  within 15 s and (b) `LOGIN_PASSWORD` is configured. If either
   condition fails, the runner stops typing and hands the window to
   the user — MFA prompts, passkey challenges, number-match screens,
   and conditional-access prompts all land here. Selectors can be
@@ -103,13 +111,20 @@ configured, otherwise it waits for the user to finish the flow.
 ## Interactive completion budget
 
 `_interactive_timeout_ms(settings)` decides how long `_wait_success`
-will watch the browser for the post-auth URL signal:
+will watch the browser for the post-auth signal:
 
 | Condition                                     | Default budget |
 |-----------------------------------------------|----------------|
-| `HEADLESS=false` (typical for SSO + MFA)       | 300 s          |
-| `HEADLESS=true`                                | 90 s           |
+| Any run (headed or headless)                   | **45 s**       |
 | Override                                       | `AUTH_INTERACTIVE_TIMEOUT_MS` env var (ms) |
+
+A typical Authenticator push / number-match flow completes in well
+under 45 s. When MFA takes longer in practice (ticket-based
+approval, passkey prompts, slow tenants), bump the env var —
+`AUTH_INTERACTIVE_TIMEOUT_MS=120000` for two minutes, etc. Failing
+fast keeps the feedback loop tight: a 5-minute idle usually signals
+a configuration problem (wrong `LOGIN_URL`, SPA redirect bug) that
+deserves investigation, not more waiting.
 
 When `HEADLESS=true` is combined with an SSO mode, the runner emits
 `auth_sso_headless` as a warning: enterprise tenants almost always
@@ -118,11 +133,49 @@ still proceeds in case the tenant relies on browser SSO cookies that
 happen to be present, but expect `success_indicator_not_seen` if it
 doesn't pan out.
 
-`_wait_success` only declares success when the page has left
-`login.microsoftonline.com` **and** is no longer on the app's
-`/login` path. Storage state is written only after that check
-passes — so a session that stalls on MFA never masquerades as a
-captured session.
+## _wait_success signal set
+
+`_wait_success` returns a `Page | None`. Scanning every page in the
+context on each tick (so popup-based flows are captured too), it
+accepts *any* of these signals as success:
+
+1. **URL-based**. The current URL contains
+   `spec.success_indicator_url_contains` (or `base_url`) and is not
+   on `login.microsoftonline.com`, OR the URL has left both the
+   provider domain and the app's `/login` path entirely.
+2. **MSAL storage present** (`_has_msal_session(page)`). Evaluates
+   `sessionStorage` + `localStorage` for any key starting with
+   `msal.` or containing `login.windows.net`,
+   `login.microsoftonline.com`, `account`, `idtoken`, `accesstoken`,
+   or `homeaccountid`. MSAL writes the account row as part of the
+   OAuth callback — its presence proves authentication completed at
+   the protocol level, even when the SPA is still rendering a 404
+   fallback because the app's configured `redirect_uri` is a route
+   it doesn't know about.
+3. **Proactive redirect nudge**. When the URL is stuck on `/login`
+   for more than 8 s *and* MSAL storage is populated, the runner
+   does a single `page.goto(base_url)`. The SPA mounts on a real
+   route, MSAL hydrates from stored tokens, authenticated DOM
+   renders, signal 1 fires.
+
+Storage state is written to `.auth/user.json` only after one of the
+three signals matches. A session that stalls on MFA never
+masquerades as a captured session.
+
+Events to watch:
+
+```
+auth_sso_button_disabled hint=polling and ticking visible consent checkboxes …
+auth_sso_button_unblocked ticked=1 attempts=1 via=input:not(:checked)
+auth_sso_button_still_disabled                    # poll gave up, handing off interactively
+auth_sso_button_clicked auto=True
+auth_sso_button_click_failed                      # click threw; falling through to _wait_success
+auth_awaiting_success timeout_ms=45000
+auth_success_signal via=url | msal_storage | marker_text
+auth_redirect_nudge from_url=…/login to_url=…     # proactive nav kicked in
+auth_success_page_found url=…/home via=main_page | popup
+auth_session_captured storage_state=.auth/user.json
+```
 
 Outcomes:
 

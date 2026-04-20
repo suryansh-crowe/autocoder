@@ -4,6 +4,13 @@
 files. Both validate the LLM's suggestions against the POM's real
 method list before writing anything.
 
+The same heal code also runs **inline** at the end of every
+`autocoder run` / `autocoder generate` as the `steps_autoheal`
+stage (see `04_pipeline.md` → stage 7b), so most stubs are filled
+before pytest ever runs. The standalone `autocoder heal` command
+below is for running the pass out-of-band — after hand edits, on a
+different model, or against an existing JUnit report.
+
 | Mode | Command | What it heals |
 |------|---------|---------------|
 | **Stub heal** (default) | `autocoder heal` | `raise NotImplementedError("Implement step: …")` bodies the renderer left when it couldn't bind a step. |
@@ -25,17 +32,27 @@ autocoder heal --junit-xml report.xml # heal from an existing JUnit report
    `raise NotImplementedError("Implement step: …")`). Hand-edited
    bodies and multi-statement bodies are **left alone**.
 2. **Loads context** for each stub: the cached POM plan
-   (`manifest/plans/<slug>_page.pom.<fp>.json`) and the extraction
-   snapshot (`manifest/extractions/<slug>.json`). The LLM sees the
-   real method list and the real element catalog — never a guess.
+   (`manifest/plans/<slug>_page.pom.<fp>.json`), the extraction
+   snapshot (`manifest/extractions/<slug>.json`), and — new —
+   the set of **forbidden element ids** (`_compute_forbidden_ids`
+   in `heal/runner.py`): for each stub, the feature file is parsed
+   to find the scenario it belongs to, and every element id that
+   prior When/And steps in that scenario acted on is added to a
+   deny list. The LLM sees the real method list, the real element
+   catalog, and the forbidden-id list — never a guess.
 3. **One LLM call per stub** asking for a single Python statement.
-   Prompt + response are JSON; ~250 in / ~50 out per stub.
+   Prompt + response are JSON; ~250 in / ~50 out per stub. The
+   system prompt bans `to_have_url(<current_page_url>)` (trivial
+   assertion) and assertions against any id in `forbidden_element_ids`.
 4. **Validates** the suggestion via AST. Rejected if it is not
-   exactly one statement, references a non-existent POM method, or
-   contains any of: `import`, `def`, `class`, `with`, `for`,
+   exactly one statement, references a non-existent POM method,
+   asserts against the current page URL, targets a forbidden id,
+   or contains any of: `import`, `def`, `class`, `with`, `for`,
    `while`, `try`, `lambda`, comprehensions, exec/eval. Rejected
-   suggestions are logged as `heal_invalid_body` and the stub is
-   left in place.
+   suggestions are logged as `heal_invalid_body`, and the stub is
+   **replaced with `pass  # no safe binding — validator rejected
+   LLM output`** so the test still collects and runs without
+   emitting a false assertion.
 5. **Applies** the validated body by line-replacement, then
    re-parses the whole file as a sanity check. If the rewritten
    file fails to parse, the change is aborted and the original is
@@ -136,12 +153,21 @@ a fresh problem, but identical failures on rerun are free.
   syntax errors, and any reference to a POM method that doesn't
   actually exist. Stub heal allows 1 statement; failure heal allows
   ≤ 5 — every statement is checked.
+- **No meaningless assertions.** The validator rejects
+  `expect(<fixture>.page).to_have_url(<current_page_url>)` (trivial:
+  the URL the extraction ran at is either already the current URL
+  or the post-nav URL, so asserting it is never a consequence
+  test) and rejects locate/click/check/fill against any id in
+  `forbidden_element_ids` (the action targets of prior scenario
+  steps). Rejected bodies are rewritten to a `pass` sentinel so the
+  test still runs.
 - **No partial writes.** If the rewritten file does not re-parse,
   the original file is left untouched (the applier raises before
   any disk write).
 - **No secrets in suggestions.** The heal prompts only ship step
-  text + POM method names + element catalog + (for failure heal)
-  the Playwright error message — never `.env` values.
+  text + POM method names + element catalog + forbidden-id list
+  + current page URL + (for failure heal) the Playwright error
+  message — never `.env` values.
 
 ## CLI options
 

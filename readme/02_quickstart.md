@@ -13,7 +13,7 @@ pip install -e .
 playwright install chromium
 ```
 
-**Verify:** `autocoder --help` lists `generate / extend / heal / rerun / status`.
+**Verify:** `autocoder --help` lists `generate / run / extend / heal / rerun / status / report`.
 
 ## 2. Start Phi-4 in Docker (loopback-only)
 
@@ -45,9 +45,17 @@ LOGIN_USERNAME=                                 # never commit
 LOGIN_PASSWORD=                                 # optional for SSO; required for inline-form login
 HEADLESS=false                                  # required for first SSO capture so you can finish MFA
 OLLAMA_NUM_PREDICT=2048                         # critical: 512 truncates feature plans
-AUTH_INTERACTIVE_TIMEOUT_MS=                    # optional ms override; default 300000 headed / 90000 headless
+AUTH_INTERACTIVE_TIMEOUT_MS=                    # optional ms override; default 45000 (45s) for both headed and headless
+AUTOCODER_AUTOREPORT=                           # optional; defaults on — set to false to skip the pytest→report.html hook
+AUTOCODER_AUTOHEAL=                             # optional; when true the pytest plugin heals failing step bodies live
+AUTOCODER_AUTOAUTH=                             # optional; defaults on whenever LOGIN_URL is set
 LOG_LEVEL=info                                  # debug | info | warn | error
 ```
+
+The 45-second default `AUTH_INTERACTIVE_TIMEOUT_MS` is tuned for
+typical MFA push / number-match flows. If your tenant uses a
+slow-to-approve flow (ticket-based approval, remote sign-in), bump
+it — e.g. `AUTH_INTERACTIVE_TIMEOUT_MS=120000` for two minutes.
 
 `LOGIN_PASSWORD` is **only** required when the app uses a classic
 inline username+password form. Microsoft/Google/GitHub SSO, magic
@@ -207,8 +215,12 @@ the real success URL, real credentials, real MFA flow.
 | Inspect status | `autocoder status` |
 | Heal stubs | `autocoder heal [--slug X] [--dry-run]` |
 | Heal runtime failures | `autocoder heal --from-pytest [--slug X]` |
+| Full HTML report (runs pytest first) | `autocoder report --run --html manifest/report.html` |
+| Re-render report from cached JUnit XML | `autocoder report --html manifest/report.html` |
+| Report as JSON for CI dashboards | `autocoder report --run --json` |
 | Verify local-only | `python scripts/verify_local_llm.py` |
 | Tail latest run log | `tail -f manifest/logs/$(ls -t manifest/logs \| head -1)` |
+| Start from scratch | See `18_cleanup.md` |
 
 ## When something fails
 
