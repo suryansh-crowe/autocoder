@@ -184,52 +184,161 @@ def _interactive_timeout_ms(settings: Settings) -> int:
     return 45_000
 
 
+_MSAL_STORAGE_JS = """() => {
+  try {
+    const keys = [
+      ...Object.keys(window.sessionStorage || {}),
+      ...Object.keys(window.localStorage || {}),
+    ];
+    return keys.some(k =>
+      k.startsWith('msal.') ||
+      k.includes('login.windows.net') ||
+      k.includes('login.microsoftonline.com') ||
+      /account|idtoken|accesstoken|homeaccountid/i.test(k)
+    );
+  } catch (e) {
+    return false;
+  }
+}"""
+
+
+def _has_msal_session(pg: Page) -> bool:
+    """Return True when MSAL has stashed an authenticated account."""
+    try:
+        return bool(pg.evaluate(_MSAL_STORAGE_JS))
+    except Exception:
+        return False
+
+
 def _wait_success(
     page: Page,
     spec: AuthSpec,
     settings: Settings,
     timeout_ms: int = 90_000,
-) -> bool:
-    """Return ``True`` when the page looks authenticated.
+) -> Page | None:
+    """Return the authenticated :class:`Page` when one appears, else ``None``.
 
-    We accept any of:
+    Scans **every** page in the context on each tick. We accept a page
+    as authenticated when ANY of these signals match:
 
-    * the current URL contains the declared ``success_indicator_url_contains``;
-    * the current URL contains ``settings.base_url`` and is no longer
-      on ``login.microsoftonline.com`` (covers the SSO return hop);
-    * the declared ``success_indicator_text`` is visible.
+    1. **URL-based**: the declared ``success_indicator_url_contains``
+       matches, or the URL is inside ``base_url`` and off the provider
+       domain, or the URL has left both Entra and ``/login``.
+    2. **MSAL storage-based**: MSAL has written account tokens into
+       ``sessionStorage`` / ``localStorage`` — even if the URL is still
+       ``/login`` (this happens when the app's configured redirect_uri
+       sends the callback to a 404-shaped route; MSAL processes the
+       code regardless, leaves the account in storage, but the SPA
+       router can't render the post-auth view from that route).
+    3. **Fallback proactive nav**: when none of the above fire but
+       MSAL storage is present, try navigating to ``base_url`` once.
+       If the authenticated DOM shows (no more "Sign in with
+       Microsoft" button), that's success.
+
+    Returns the :class:`Page` on which the successful state was seen
+    (important for popup-based flows) or ``None`` on deadline.
     """
     marker_url = spec.success_indicator_url_contains or settings.base_url or ""
     marker_text = spec.success_indicator_text or ""
+    nav_fallback_tried = False
 
-    def _probe() -> bool:
-        try:
-            url = page.url or ""
-        except Exception:
-            url = ""
+    def _url_ok(url: str) -> bool:
         if marker_url and marker_url in url and "login.microsoftonline.com" not in url:
             return True
-        if marker_text:
-            try:
-                if page.get_by_text(marker_text, exact=False).first.is_visible():
-                    return True
-            except Exception:
-                pass
-        # Fallback: we left the provider domain *and* we are no longer on the
-        # app's /login path. That is the common "landed on home" shape.
         if "login.microsoftonline.com" not in url and "/login" not in url:
             return bool(url and url != "about:blank")
         return False
 
+    def _looks_auth(pg: Page) -> tuple[bool, str]:
+        try:
+            url = pg.url or ""
+        except Exception:
+            return False, ""
+        if _url_ok(url):
+            return True, "url"
+        if marker_text:
+            try:
+                if pg.get_by_text(marker_text, exact=False).first.is_visible():
+                    return True, "marker_text"
+            except Exception:
+                pass
+        if _has_msal_session(pg):
+            return True, "msal_storage"
+        return False, ""
+
     deadline = time.monotonic() + timeout_ms / 1000.0
+    stuck_on_login_since: float | None = None
+    last_log_at = 0.0
     while time.monotonic() < deadline:
-        if _probe():
-            return True
+        try:
+            candidates = list(page.context.pages) if page and page.context else [page]
+        except Exception:
+            candidates = [page]
+        for pg in candidates:
+            if pg is None:
+                continue
+            ok, via = _looks_auth(pg)
+            if ok:
+                logger.info("auth_success_signal", via=via, url=logger.safe_url(pg.url))
+                return pg
+
+        # Fallback: if we've been stuck on the app's /login for more
+        # than 8 s and MSAL has populated storage, the SPA is never
+        # going to render the authenticated view from /login — it's
+        # a 404 route for this app. Nudge the browser to base_url
+        # once and let MSAL finish hydrating from its stored tokens.
+        now = time.monotonic()
+        try:
+            cur_url = page.url or ""
+        except Exception:
+            cur_url = ""
+        if "/login" in cur_url and "login.microsoftonline.com" not in cur_url:
+            stuck_on_login_since = stuck_on_login_since or now
+            if (
+                not nav_fallback_tried
+                and now - stuck_on_login_since >= 8.0
+                and _has_msal_session(page)
+                and (settings.base_url or marker_url)
+            ):
+                target = settings.base_url or marker_url
+                if target and target != cur_url.rstrip("/"):
+                    nav_fallback_tried = True
+                    logger.info(
+                        "auth_redirect_nudge",
+                        from_url=logger.safe_url(cur_url),
+                        to_url=logger.safe_url(target),
+                        hint=(
+                            "MSAL tokens are in storage but the SPA is "
+                            "stuck on /login (configured redirect_uri is "
+                            "a 404 route in this app). Nudging browser to "
+                            "base_url so MSAL can hydrate the authenticated "
+                            "view."
+                        ),
+                    )
+                    try:
+                        page.goto(target, wait_until="domcontentloaded", timeout=15_000)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warn("auth_redirect_nudge_failed", err=str(exc)[:200])
+        else:
+            stuck_on_login_since = None
+
+        if now - last_log_at >= 10.0:
+            last_log_at = now
+            try:
+                logger.debug(
+                    "auth_wait_tick",
+                    url=logger.safe_url(cur_url),
+                    has_msal=_has_msal_session(page),
+                    remaining_s=f"{deadline - now:.1f}",
+                )
+            except Exception:
+                pass
+
         try:
             page.wait_for_timeout(500)
         except Exception:
             time.sleep(0.5)
-    return False
+    return None
 
 
 def _run_form_flow(page: Page, spec: AuthSpec, username: str, password: str) -> None:
@@ -315,86 +424,111 @@ def _run_username_first_flow(
     return "no_second_step"
 
 
-def _unblock_sso_button(page: Page, sso_selector: StableSelector) -> bool:
+def _unblock_sso_button(
+    page: Page,
+    sso_selector: StableSelector,
+    *,
+    deadline_s: float = 15.0,
+) -> bool:
     """Tick consent checkboxes until the SSO button becomes enabled.
 
     Many apps render a "Sign in with Microsoft" button that is
     ``disabled`` until a Terms-of-Service / privacy checkbox is
-    ticked. We detect that state and tick visible unchecked
-    checkboxes in order until either:
+    ticked. The SPA may mount the checkbox *after* its first frame —
+    so a one-shot tick at page-load time can run too early. We poll:
+    tick anything that looks like consent, re-probe the button, and
+    keep retrying until the button is enabled or ``deadline_s``
+    elapses. Ticking consent checkboxes is safe — the user has
+    already supplied credentials in ``.env``, which is an implicit
+    green light.
 
-    * the button reports ``is_enabled() == True``, or
-    * we run out of candidates.
-
-    Returns ``True`` when the button is enabled (either because it
-    already was, or because we unblocked it). Ticking consent
-    checkboxes is safe: the user has already provided their
-    credentials in the env, which is an implicit green light.
+    Returns ``True`` when the button is enabled, ``False`` on deadline.
     """
     try:
         btn = _locate(page, sso_selector).first
     except Exception:
         return False
-    try:
-        if btn.is_enabled():
-            return True
-    except Exception:
-        return False
+
+    def _enabled() -> bool:
+        try:
+            return btn.is_enabled()
+        except Exception:
+            return False
+
+    if _enabled():
+        return True
 
     logger.info(
         "auth_sso_button_disabled",
         hint=(
-            "SSO button is disabled — attempting to tick visible consent "
-            "checkboxes so the button becomes enabled."
+            "SSO button is disabled — polling and ticking visible consent "
+            "checkboxes until it becomes enabled (deadline "
+            f"{deadline_s:.0f}s)."
         ),
     )
 
-    # Try native HTML checkboxes first, then ARIA role-based checkboxes
-    # (used by React/MUI/Chakra wrappers).
+    deadline = time.monotonic() + deadline_s
     ticked = 0
-    for sel in (
-        'input[type="checkbox"]:not(:checked)',
-        '[role="checkbox"][aria-checked="false"]',
-    ):
-        try:
-            loc = page.locator(sel)
-            count = min(loc.count(), 5)
-        except Exception:
-            continue
-        for i in range(count):
-            cb = loc.nth(i)
+    attempts = 0
+    while time.monotonic() < deadline:
+        attempts += 1
+        # Each iteration: sweep every checkbox-ish control once.
+        for sel in (
+            'input[type="checkbox"]:not(:checked)',
+            '[role="checkbox"][aria-checked="false"]',
+            'label:has(input[type="checkbox"]:not(:checked))',
+        ):
             try:
-                if not cb.is_visible():
-                    continue
-                cb.check(timeout=3_000)
-                ticked += 1
+                loc = page.locator(sel)
+                count = min(loc.count(), 8)
             except Exception:
-                # Some consent controls are rendered as labels; fall
-                # back to clicking the parent label.
+                continue
+            for i in range(count):
+                cb = loc.nth(i)
                 try:
-                    cb.click(timeout=2_000)
+                    if not cb.is_visible():
+                        continue
+                    cb.check(timeout=2_500)
                     ticked += 1
                 except Exception:
-                    continue
-            # After each tick, re-probe the SSO button.
-            try:
-                if btn.is_enabled():
+                    try:
+                        cb.click(timeout=2_000)
+                        ticked += 1
+                    except Exception:
+                        continue
+                if _enabled():
                     logger.info(
                         "auth_sso_button_unblocked",
                         ticked=ticked,
+                        attempts=attempts,
                         via=sel,
                     )
                     return True
-            except Exception:
-                pass
+        # Short sleep before the next sweep so a reactive SPA has time
+        # to re-render the button-enabled state after our last tick.
+        try:
+            page.wait_for_timeout(750)
+        except Exception:
+            time.sleep(0.75)
+        if _enabled():
+            logger.info(
+                "auth_sso_button_unblocked",
+                ticked=ticked,
+                attempts=attempts,
+                via="late_reactive_update",
+            )
+            return True
+
     logger.warn(
         "auth_sso_button_still_disabled",
         ticked=ticked,
+        attempts=attempts,
         hint=(
             "Could not find a consent checkbox that enables the SSO "
-            "button. If there is a custom control (dropdown, radio, "
-            "terms modal) it must be completed manually once with "
-            "HEADLESS=false."
+            "button within the deadline. Runner will NOT abort — it "
+            "will hand off to the interactive wait so you can tick "
+            "the consent control + click Sign in yourself in the "
+            "visible browser."
         ),
     )
     return False
@@ -441,10 +575,42 @@ def _run_microsoft_sso_flow(
     # Consent-first pattern: many apps ship a "Sign in with Microsoft"
     # button that is disabled until the user ticks a Terms-of-Service
     # / Privacy-Policy checkbox. Tick any visible unchecked consent
-    # checkbox and see if that enables the button.
-    _unblock_sso_button(page, spec.sso_button_selector)
+    # checkbox and see if that enables the button. We poll for up to
+    # 15 s because the SPA may render the checkbox after its first
+    # frame — a one-shot tick at page-load time often fires too early.
+    enabled = _unblock_sso_button(page, spec.sso_button_selector)
 
-    _locate(page, spec.sso_button_selector).click()
+    # Attempt the click. If the button is still disabled (custom
+    # consent UI we couldn't find, checkbox not rendered yet, etc.),
+    # do NOT abort — log a clear message and hand off to
+    # ``_wait_success``. The user can tick the checkbox + click Sign
+    # in themselves in the visible browser, and the same success
+    # polling will capture the session. Auto-click here is a
+    # convenience; it must not be a requirement.
+    try:
+        _locate(page, spec.sso_button_selector).click(timeout=10_000 if enabled else 4_000)
+        logger.info("auth_sso_button_clicked", auto=True)
+    except Exception as exc:
+        logger.warn(
+            "auth_sso_button_click_failed",
+            err=str(exc)[:200],
+            hint=(
+                "Could not click Sign in automatically (usually because "
+                "the consent checkbox is a custom control). Please tick "
+                "the consent checkbox and click Sign in yourself in the "
+                "visible browser window — the runner will keep watching "
+                "the URL and capture the session once MFA completes."
+            ),
+        )
+        # Try a JS-level click as one more automated fallback — some
+        # apps disable the button via CSS but accept programmatic clicks.
+        try:
+            handle = _locate(page, spec.sso_button_selector).first.element_handle()
+            if handle is not None:
+                page.evaluate("(el) => el.click()", handle)
+                logger.info("auth_sso_button_clicked", auto=True, via="js_fallback")
+        except Exception:
+            pass
 
     # Give the popup a beat to appear. If it does, switch to it.
     try:
@@ -769,7 +935,10 @@ def run_auth(
                         "the visible browser window if prompted"
                     ),
                 )
-            if not _wait_success(active, spec, settings, timeout_ms=wait_timeout_ms):
+            winning_page = _wait_success(
+                active, spec, settings, timeout_ms=wait_timeout_ms
+            )
+            if winning_page is None:
                 _dump_failure_artifacts(active, settings, spec)
                 return AuthRunResult(
                     ok=False,
@@ -790,8 +959,13 @@ def run_auth(
                     },
                 )
 
+            logger.info(
+                "auth_success_page_found",
+                url=logger.safe_url(winning_page.url),
+                via="popup" if winning_page is not active else "main_page",
+            )
             sess.context.storage_state(path=str(storage_path))
-            _save_session_storage(active, storage_path)
+            _save_session_storage(winning_page, storage_path)
             if on_storage_saved is not None:
                 try:
                     on_storage_saved(str(storage_path))
@@ -800,7 +974,7 @@ def run_auth(
             return AuthRunResult(
                 ok=True,
                 reason="ok",
-                final_url=active.url,
+                final_url=winning_page.url,
                 elapsed_s=time.monotonic() - started,
                 diagnostics={"nav": diag.to_dict()},
             )

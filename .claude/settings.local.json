@@ -61,7 +61,9 @@
       "Bash(python -m autocoder.cli report)",
       "Bash(python -m autocoder.cli report --html manifest/report.html --no-open)",
       "Bash(python -c \"from autocoder.extract.auth_runner import _interactive_timeout_ms; from autocoder.config import load_settings; s = load_settings\\(\\); print\\('timeout_ms =', _interactive_timeout_ms\\(s\\)\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('tests/conftest.py'\\).read\\(\\)\\); print\\('conftest ok'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('tests/conftest.py'\\).read\\(\\)\\); print\\('conftest ok'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/autocoder/extract/auth_runner.py'\\).read\\(\\)\\); print\\('syntax ok'\\)\")",
+      "Bash(python -m py_compile src/autocoder/extract/auth_runner.py)"
     ]
   },
   "disabledMcpjsonServers": [

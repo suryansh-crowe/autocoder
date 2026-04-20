@@ -66,6 +66,68 @@ from autocoder.utils import page_class_name
 DEFAULT_TIERS = ["smoke", "happy", "validation"]
 
 
+def _strip_step_bodies_for_heal(source: str) -> str:
+    """Rewrite every step function body to ``raise NotImplementedError``.
+
+    Used when the freshly-rendered test file fails ``ast.parse`` — a
+    single malformed body would otherwise block pytest collection for
+    the entire tests directory. Stripping to
+    ``NotImplementedError("Implement step: <text>")`` restores a
+    parseable module so pytest can collect, and the same shape is what
+    the auto-heal scanner looks for — it will refill each body via
+    the LLM on the next heal pass.
+
+    Line-based rewrite (not AST, because the AST is what's broken).
+    A step function is identified by: ``def _<name>(<fixture>: <Cls>) -> None:``
+    immediately preceded by one or more ``@given/@when/@then`` decorators.
+    Everything between that header and the next blank-line-then-decorator
+    boundary is replaced with a single ``raise NotImplementedError(...)``.
+    """
+    import re as _re
+
+    lines = source.splitlines(keepends=False)
+    out: list[str] = []
+    i = 0
+    header_re = _re.compile(
+        r"^\s*def\s+(_[A-Za-z0-9_]+)\s*\([a-zA-Z0-9_]+\s*:\s*[A-Za-z0-9_]+\s*\)\s*->\s*None\s*:\s*$"
+    )
+    parse_re = _re.compile(r"parsers\.parse\(\s*['\"](.+?)['\"]\s*\)", _re.DOTALL)
+    while i < len(lines):
+        line = lines[i]
+        m = header_re.match(line)
+        if not m:
+            out.append(line)
+            i += 1
+            continue
+        # Walk backward through contiguous decorator lines to find
+        # the @<keyword>(parsers.parse('<text>')) that owns this function.
+        step_text = m.group(1).lstrip("_").replace("_", " ")
+        j = i - 1
+        while j >= 0 and lines[j].lstrip().startswith("@"):
+            pm = parse_re.search(lines[j])
+            if pm:
+                step_text = pm.group(1)
+                break
+            j -= 1
+        out.append(line)
+        # Skip the original body — everything until a blank line
+        # followed by a decorator / EOF.
+        i += 1
+        while i < len(lines):
+            nxt = lines[i]
+            stripped = nxt.strip()
+            if stripped == "" and i + 1 < len(lines) and lines[i + 1].lstrip().startswith("@"):
+                break
+            if stripped.startswith("@") and not nxt.startswith(" "):
+                break
+            i += 1
+        # Emit a clean stub body at the function's indentation level.
+        escaped = step_text.replace("\\", "\\\\").replace('"', '\\"')
+        out.append(f'    raise NotImplementedError("Implement step: {escaped}")')
+        out.append("")
+    return "\n".join(out) + ("\n" if source.endswith("\n") else "")
+
+
 @dataclass
 class GenerateOptions:
     urls: list[str]
@@ -1213,6 +1275,50 @@ def _process_url(
         pom_module=f"{node.slug}_page",
         elements=list(extraction.elements),
     )
+    # Syntax-check the rendered module before writing. A single bad
+    # step — e.g. a string argument joined as a bare identifier —
+    # turns the whole file into a ``SyntaxError`` that blocks pytest
+    # collection for ALL tests, not just this slug's. When that
+    # happens we rewrite the offending bodies to
+    # ``NotImplementedError`` so collection stays clean and the
+    # auto-heal pass can fill them.
+    import ast as _ast
+
+    try:
+        _ast.parse(rendered_steps)
+    except SyntaxError as exc:
+        logger.warn(
+            "steps_syntax_error",
+            slug=node.slug,
+            err=str(exc),
+            line=exc.lineno or 0,
+            hint=(
+                "rewriting the whole module's step bodies to "
+                "NotImplementedError so pytest collection succeeds; "
+                "auto-heal will refill them via the LLM."
+            ),
+        )
+        rendered_steps = _strip_step_bodies_for_heal(rendered_steps)
+        # If stripping somehow produces another SyntaxError, refuse to
+        # write — better to leave the previous good file in place.
+        try:
+            _ast.parse(rendered_steps)
+        except SyntaxError as exc2:
+            logger.error(
+                "steps_write_aborted",
+                slug=node.slug,
+                err=str(exc2),
+                hint="fallback strip also produced invalid Python; not writing",
+            )
+            node.status = Status.FAILED
+            return StageResult(
+                node=node,
+                extraction=extraction,
+                pom_path=pom_path,
+                feature_path=feature_path,
+                steps_path=None,
+                issues=issues + [f"steps_syntax_error_unrecoverable: {exc2!s}"],
+            )
     steps_path.write_text(rendered_steps, encoding="utf-8")
     node.steps_path = str(steps_path)
     node.last_fingerprint = extraction.fingerprint

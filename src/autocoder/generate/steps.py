@@ -345,10 +345,23 @@ def _body(
         required = pom_args_by_method.get(step.pom_method, [])
         supplied = list(extracted_args) + list(step.args or [])
         if len(supplied) >= len(required):
-            return (
-                f"{fixture_name}.{step.pom_method}("
-                f"{', '.join(supplied[: len(required)] or supplied)})"
-            )
+            # ``extracted_args`` (first slot) are Python identifiers —
+            # step-function parameters bound by parsers.parse, so they
+            # emit verbatim. ``step.args`` (from the feature plan JSON)
+            # are LITERAL VALUES — they must be ``repr``'d to become
+            # valid Python string literals. Before this fix the
+            # renderer joined both kinds as bare identifiers, producing
+            # ``fill_search_assets(customer data)`` which is a
+            # SyntaxError.
+            n_identifiers = len(extracted_args)
+            positional = supplied[: len(required)]
+            rendered: list[str] = []
+            for i, val in enumerate(positional):
+                if i < n_identifiers:
+                    rendered.append(str(val))
+                else:
+                    rendered.append(repr(val))
+            return f"{fixture_name}.{step.pom_method}({', '.join(rendered)})"
         missing = ", ".join(required[len(supplied):])
         return (
             f'raise NotImplementedError('
