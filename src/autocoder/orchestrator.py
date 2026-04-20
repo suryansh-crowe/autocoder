@@ -944,6 +944,17 @@ def _run_and_persist_auth(
             auth_kind=spec.auth_kind,
             elapsed=f"{result.elapsed_s:.2f}s",
         )
+        # "Settle" step: _wait_success may have returned while the
+        # browser is still on the SSO return URL (often ``/login`` for
+        # apps whose MSAL redirect_uri is a non-existent SPA route).
+        # If extraction starts from there, the SPA's first goto to a
+        # protected URL can bounce right back to /login because MSAL
+        # hasn't hydrated yet — and extraction captures the 404 DOM.
+        # Proactively navigate the shared page to ``base_url`` now,
+        # which gives MSAL one clean boot on a real route. Every
+        # per-URL extraction afterwards starts from a hydrated,
+        # authenticated SPA instead of the raw OAuth-return landing.
+        _settle_after_auth(shared, settings, result.final_url)
         stale = 0
         for n in registry.nodes.values():
             if n.kind == URLKind.LOGIN:
@@ -1508,6 +1519,120 @@ def _storage_state_usable(settings: Settings) -> bool:
         return sp.exists() and sp.stat().st_size > 0
     except OSError:
         return False
+
+
+def _settle_after_auth(
+    shared: BrowserSession | None,
+    settings: Settings,
+    post_auth_url: str,
+) -> None:
+    """Move the shared browser OFF the SSO return URL onto a real
+    authenticated route before extraction starts.
+
+    Why: many enterprise MSAL apps register ``/login`` (or similar)
+    as the OAuth ``redirect_uri``, even though that route does not
+    exist in the SPA router. The redirect lands the tab on a 404
+    shell while MSAL tokens sit in ``sessionStorage`` unread. If the
+    per-URL extraction pipeline starts from that tab, the SPA's
+    first navigation to a protected route can bounce straight back
+    to ``/login`` (because MSAL never got a chance to mount on a
+    real page), and the extractor captures the 404 DOM as if it were
+    the real application.
+
+    The fix is to navigate ONCE to a known-real route (``base_url``)
+    and wait for the page to leave the ``/login`` shell. After that,
+    every subsequent ``goto_resilient`` starts from a hydrated,
+    authenticated SPA. The authenticated-shell quick-check uses the
+    same DOM heuristic as the silent-reauth path so we stop at the
+    first sign of a real app UI.
+
+    No-op when:
+    * no shared session was opened (the runner used a throwaway
+      context),
+    * ``settings.base_url`` is empty,
+    * the post-auth URL is already on ``base_url`` and off ``/login``.
+    """
+    if shared is None:
+        return
+    target = (settings.base_url or "").rstrip("/")
+    if not target:
+        return
+    cur = post_auth_url or ""
+    if target in cur and "/login" not in cur:
+        logger.info(
+            "auth_settle_skipped",
+            reason="post_auth_url_already_on_base",
+            url=logger.safe_url(cur),
+        )
+        return
+
+    logger.info(
+        "auth_settle_start",
+        from_url=logger.safe_url(cur),
+        to_url=logger.safe_url(target),
+        hint=(
+            "moving the shared browser off the OAuth return URL onto "
+            "base_url so MSAL hydrates on a real SPA route; protects "
+            "extraction from the '/login 404' redirect bounce."
+        ),
+    )
+    try:
+        goto_resilient(
+            shared.page,
+            target,
+            nav_timeout_ms=settings.browser.extraction_nav_timeout_ms,
+            diagnostics_dir=settings.paths.logs_dir,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warn(
+            "auth_settle_nav_failed",
+            err=str(exc)[:200],
+            hint=(
+                "couldn't settle onto base_url — extraction will retry "
+                "per-URL with the same storage_state anyway"
+            ),
+        )
+        return
+
+    # Wait for a real SPA element to attach, giving MSAL time to
+    # process whatever was in sessionStorage. 15 s is enough even on
+    # slow CPUs.
+    try:
+        shared.page.wait_for_selector(
+            'button, a[href], input, textarea, select, '
+            '[role="button"], [role="link"], [role="textbox"]',
+            state="attached",
+            timeout=15_000,
+        )
+    except Exception:
+        pass
+
+    # If the app's auth shell is still showing (SSO button visible),
+    # try a silent re-auth on this fresh tab. Cheap: the tokens are
+    # already in storage, so it completes without MFA.
+    try:
+        if _looks_auth_gated_quick(shared.page):
+            logger.info(
+                "auth_settle_silent_reauth",
+                hint="base_url still shows the SSO shell; triggering silent MSAL handshake",
+            )
+            _silent_reauth(shared, target, settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.warn("auth_settle_silent_reauth_failed", err=str(exc)[:200])
+
+    try:
+        final = shared.page.url or ""
+    except Exception:
+        final = ""
+    logger.ok(
+        "auth_settle_done",
+        final_url=logger.safe_url(final),
+        on_login_shell="/login" in final,
+        hint=(
+            "extraction pipeline now starts from this URL instead of the "
+            "OAuth return landing"
+        ),
+    )
 
 
 _AUTH_GATED_SSO_PHRASES = (

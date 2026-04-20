@@ -48,8 +48,25 @@ def _need(env: str) -> str:
     return val
 
 
+def _skip_if_session_captured() -> None:
+    """Skip the test when `.auth/user.json` already exists and is non-empty.
+
+    `autocoder run` and the conftest `_ensure_auth_session` fixture both
+    capture storage_state in-process. Re-running this test after that
+    is redundant and fails on SSO/passwordless tenants where some env
+    vars (e.g. LOGIN_PASSWORD) are deliberately unset. Delete
+    `.auth/user.json` to force a fresh capture.
+    """
+    if _STORAGE_STATE.exists() and _STORAGE_STATE.stat().st_size > 0:
+        pytest.skip(
+            f"storage_state already captured at {{_STORAGE_STATE}} — "
+            "delete the file to force a fresh capture."
+        )
+
+
 @pytest.mark.auth_setup
 def test_auth_setup(page: Page) -> None:
+    _skip_if_session_captured()
     username = _need("{username_env}")
     password = _need("{password_env}")
 
@@ -87,8 +104,25 @@ def _need(env: str) -> str:
     return val
 
 
+def _skip_if_session_captured() -> None:
+    """Skip the test when `.auth/user.json` already exists and is non-empty.
+
+    `autocoder run` and the conftest `_ensure_auth_session` fixture both
+    capture storage_state in-process. Re-running this test after that
+    is redundant and fails on SSO/passwordless tenants where some env
+    vars (e.g. LOGIN_PASSWORD) are deliberately unset. Delete
+    `.auth/user.json` to force a fresh capture.
+    """
+    if _STORAGE_STATE.exists() and _STORAGE_STATE.stat().st_size > 0:
+        pytest.skip(
+            f"storage_state already captured at {{_STORAGE_STATE}} — "
+            "delete the file to force a fresh capture."
+        )
+
+
 @pytest.mark.auth_setup
 def test_auth_setup(page: Page) -> None:
+    _skip_if_session_captured()
     username = _need("{username_env}")
     password = os.environ.get("{password_env}", "").strip()  # optional
 
@@ -154,8 +188,25 @@ def _need(env: str) -> str:
     return val
 
 
+def _skip_if_session_captured() -> None:
+    """Skip the test when `.auth/user.json` already exists and is non-empty.
+
+    `autocoder run` and the conftest `_ensure_auth_session` fixture both
+    capture storage_state in-process. Re-running this test after that
+    is redundant and fails on SSO/passwordless tenants where some env
+    vars (e.g. LOGIN_PASSWORD) are deliberately unset. Delete
+    `.auth/user.json` to force a fresh capture.
+    """
+    if _STORAGE_STATE.exists() and _STORAGE_STATE.stat().st_size > 0:
+        pytest.skip(
+            f"storage_state already captured at {{_STORAGE_STATE}} — "
+            "delete the file to force a fresh capture."
+        )
+
+
 @pytest.mark.auth_setup
 def test_auth_setup(page: Page) -> None:
+    _skip_if_session_captured()
     username = _need("{username_env}")
 
     page.goto(_LOGIN_URL)
@@ -200,6 +251,22 @@ def _need(env: str) -> str:
     return val
 
 
+def _skip_if_session_captured() -> None:
+    """Skip the test when `.auth/user.json` already exists and is non-empty.
+
+    `autocoder run` and the conftest `_ensure_auth_session` fixture both
+    capture storage_state in-process. Re-running this test after that
+    is redundant and fails on SSO/passwordless tenants where some env
+    vars (e.g. LOGIN_PASSWORD) are deliberately unset. Delete
+    `.auth/user.json` to force a fresh capture.
+    """
+    if _STORAGE_STATE.exists() and _STORAGE_STATE.stat().st_size > 0:
+        pytest.skip(
+            f"storage_state already captured at {{_STORAGE_STATE}} — "
+            "delete the file to force a fresh capture."
+        )
+
+
 def _click_kmsi(page: Page) -> None:
     """Best-effort click through the 'Stay signed in?' prompt."""
     for sel in ("#idSIButton9", "#acceptButton", 'input[type="submit"]'):
@@ -214,6 +281,7 @@ def _click_kmsi(page: Page) -> None:
 
 @pytest.mark.auth_setup
 def test_auth_setup(page: Page, context) -> None:
+    _skip_if_session_captured()
     username = _need("{username_env}")
     password = _need("{password_env}")
 
