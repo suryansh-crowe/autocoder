@@ -167,15 +167,21 @@ def _credentials(spec: AuthSpec) -> tuple[str | None, str | None, str]:
 def _interactive_timeout_ms(settings: Settings) -> int:
     """How long the runner waits for the authenticated state to arrive.
 
-    Headed runs deserve a generous window because the user may need to
-    complete MFA (Authenticator push, number-matching, SMS). Headless
-    runs get a shorter window because nothing is interactive anyway —
-    if SSO cookies do not land a session inside 90s, they won't.
+    Default is 45s for both headed and headless. A typical Authenticator
+    push / number-match flow completes in well under that; anything
+    longer usually signals a configuration problem (wrong LOGIN_URL,
+    SPA redirect bug) rather than a slow user, so we'd rather fail fast
+    and let the user diagnose than sit idle for minutes.
+
+    Override via ``AUTH_INTERACTIVE_TIMEOUT_MS`` in ``.env`` when a
+    specific tenant genuinely needs more time (e.g. passkey-first flows
+    that prompt for a hardware key, or tenants that require a ticket
+    approval step).
     """
     override = os.environ.get("AUTH_INTERACTIVE_TIMEOUT_MS", "").strip()
     if override.isdigit():
         return int(override)
-    return 300_000 if not settings.browser.headless else 90_000
+    return 45_000
 
 
 def _wait_success(

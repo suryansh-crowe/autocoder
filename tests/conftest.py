@@ -302,3 +302,128 @@ def raw_page(raw_context: BrowserContext) -> Iterator[Page]:
         yield page
     finally:
         page.close()
+
+
+# ---------------------------------------------------------------------------
+# Auto-report: every `pytest tests/...` invocation writes JUnit XML per-slug
+# and (re)generates manifest/report.html with the latest pass/fail state.
+# ---------------------------------------------------------------------------
+
+
+def _manifest_dir() -> Path:
+    raw = os.environ.get("AUTOCODER_MANIFEST_DIR", "manifest")
+    p = Path(raw)
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    return p
+
+
+def _auto_report_enabled() -> bool:
+    """True unless the user explicitly opted out via env."""
+    raw = os.environ.get("AUTOCODER_AUTOREPORT", "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def pytest_configure(config: "pytest.Config") -> None:
+    """Auto-add ``--junit-xml=manifest/runs/_pytest_session.xml`` when unset.
+
+    Produces the raw XML that ``pytest_sessionfinish`` below splits per
+    slug and hands to ``autocoder.report`` for the HTML dashboard.
+    """
+    if not _auto_report_enabled():
+        return
+    # Respect any explicit --junit-xml / --junitxml from the CLI.
+    if config.getoption("--junit-xml", default=None):
+        return
+    runs_dir = _manifest_dir() / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    config.option.xmlpath = str(runs_dir / "_pytest_session.xml")
+
+
+def _split_junit_per_slug(session_xml: Path, runs_dir: Path) -> list[str]:
+    """Copy each testcase into a per-slug JUnit XML so ``build_report``
+    can show one row per generated suite. Returns the list of slugs
+    touched this session.
+    """
+    import xml.etree.ElementTree as ET
+
+    if not session_xml.exists():
+        return []
+    try:
+        tree = ET.parse(session_xml)
+    except ET.ParseError:
+        return []
+    root = tree.getroot()
+
+    by_slug: dict[str, list[ET.Element]] = {}
+    for case in root.iter("testcase"):
+        classname = case.attrib.get("classname", "")
+        # e.g. ``tests.steps.test_catalog`` → ``catalog``
+        last = classname.split(".")[-1]
+        if not last.startswith("test_"):
+            continue
+        slug = last[len("test_"):]
+        by_slug.setdefault(slug, []).append(case)
+
+    touched: list[str] = []
+    for slug, cases in by_slug.items():
+        out_root = ET.Element("testsuites")
+        suite = ET.SubElement(
+            out_root,
+            "testsuite",
+            {
+                "name": f"test_{slug}",
+                "tests": str(len(cases)),
+                "failures": str(sum(1 for c in cases if c.find("failure") is not None)),
+                "errors": str(sum(1 for c in cases if c.find("error") is not None)),
+            },
+        )
+        for c in cases:
+            suite.append(c)
+        out_path = runs_dir / f"{slug}.xml"
+        ET.ElementTree(out_root).write(out_path, encoding="utf-8", xml_declaration=True)
+        touched.append(slug)
+    return touched
+
+
+def pytest_sessionfinish(session: "pytest.Session", exitstatus: int) -> None:
+    """Regenerate manifest/report.html using the JUnit XML this run produced.
+
+    Silent no-op when the autocoder package isn't importable (someone
+    running just the generated suite in a bare venv) or when the user
+    opted out via ``AUTOCODER_AUTOREPORT=false``.
+    """
+    if not _auto_report_enabled():
+        return
+    manifest_dir = _manifest_dir()
+    runs_dir = manifest_dir / "runs"
+    session_xml = runs_dir / "_pytest_session.xml"
+
+    touched = _split_junit_per_slug(session_xml, runs_dir)
+    if not touched:
+        return
+
+    try:
+        from autocoder.config import load_settings
+        from autocoder.report import build_report, render_html_report
+    except Exception:
+        return
+
+    try:
+        settings = load_settings()
+        data = build_report(settings, run_pytest=False)
+        html_path = manifest_dir / "report.html"
+        html_path.write_text(render_html_report(data), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_line(f"[autocoder-report] skipped: {exc!s}", yellow=True)
+        return
+
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line("")
+        reporter.write_line(
+            f"[autocoder-report] {len(touched)} slug(s) updated → {html_path}",
+            cyan=True,
+        )

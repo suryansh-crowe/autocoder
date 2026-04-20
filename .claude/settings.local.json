@@ -59,7 +59,9 @@
       "Bash(python -c \"from autocoder.generate.steps import render_steps, _try_synthesize, _best_element_match; print\\('ok'\\)\")",
       "Bash(python -m autocoder.cli report --help)",
       "Bash(python -m autocoder.cli report)",
-      "Bash(python -m autocoder.cli report --html manifest/report.html --no-open)"
+      "Bash(python -m autocoder.cli report --html manifest/report.html --no-open)",
+      "Bash(python -c \"from autocoder.extract.auth_runner import _interactive_timeout_ms; from autocoder.config import load_settings; s = load_settings\\(\\); print\\('timeout_ms =', _interactive_timeout_ms\\(s\\)\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('tests/conftest.py'\\).read\\(\\)\\); print\\('conftest ok'\\)\")"
     ]
   },
   "disabledMcpjsonServers": [
