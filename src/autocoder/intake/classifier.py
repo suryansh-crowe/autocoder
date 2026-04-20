@@ -154,6 +154,14 @@ def classify_urls(
     or is redirected to, a page that looks like a login form. Callers
     use it to seed ``Registry.auth.login_url`` when no LOGIN_URL was
     provided in the env.
+
+    Fast path: when ``settings.login_url`` is explicitly set in ``.env``,
+    every input URL that is neither login-shaped nor the declared login
+    URL skips the anonymous browser probe entirely — it is marked
+    ``kind=UNKNOWN, requires_auth=True`` directly. This saves one
+    Chromium launch per URL (8 URLs → 8 saved probes) and avoids the
+    ~60s of auth-gated-shell noise you see when every page sits behind
+    the same SSO wall.
     """
     urls = [u for u in urls if u]
     if not urls:
@@ -164,6 +172,59 @@ def classify_urls(
     seen_slugs: dict[str, int] = {}
 
     nav_timeout = settings.browser.extraction_nav_timeout_ms
+    login_url = (settings.login_url or "").rstrip("/")
+
+    # --- Fast path: LOGIN_URL is declared, trust it and skip probing. ---
+    if login_url:
+        logger.info(
+            "classify_fast_path",
+            count=len(urls),
+            login_url=logger.safe_url(login_url),
+            reason=(
+                "LOGIN_URL is set in .env — skipping anonymous browser "
+                "probes for non-login URLs; they will be extracted under "
+                "storage_state after auth-first completes"
+            ),
+        )
+        for raw_url in urls:
+            slug = url_slug(raw_url)
+            seen_slugs[slug] = seen_slugs.get(slug, 0) + 1
+            if seen_slugs[slug] > 1:
+                slug = f"{slug}_{seen_slugs[slug]}"
+
+            normalized = raw_url.rstrip("/")
+            is_declared_login = normalized == login_url
+            url_is_login_shaped = looks_like_login_url(raw_url)
+
+            if is_declared_login or url_is_login_shaped:
+                kind = URLKind.LOGIN
+                detected_login_url = detected_login_url or raw_url
+                requires_auth = False
+                note = "login_inferred_from_env" if is_declared_login else "login_inferred_from_path"
+            else:
+                kind = URLKind.UNKNOWN
+                requires_auth = True
+                note = "auth_gated_trusted_from_env_login_url"
+
+            node = URLNode(url=raw_url, slug=slug, kind=kind, requires_auth=requires_auth)
+            node.notes.append(note)
+            nodes.append(node)
+            logger.info(
+                "classify_fast",
+                slug=slug,
+                url=logger.safe_url(raw_url),
+                kind=kind.value,
+                requires_auth=requires_auth,
+                note=note,
+            )
+        logger.ok(
+            "classify_done",
+            nodes=len(nodes),
+            login_detected=detected_login_url is not None,
+            fast_path=True,
+        )
+        return nodes, detected_login_url
+
     logger.info(
         "classify_start",
         count=len(urls),

@@ -1,0 +1,201 @@
+version: 1
+base_url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net
+auth:
+  login_url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/login
+  username_env: LOGIN_USERNAME
+  password_env: LOGIN_PASSWORD
+  otp_secret_env: LOGIN_OTP_SECRET
+  auth_kind: sso_microsoft
+  username_selector:
+    strategy: xpath
+    value: /html[1]/body[1]/div[1]/div[1]/div[2]/div[1]/label[1]/input[1]
+    role: checkbox
+    name: null
+    nth: null
+  password_selector: null
+  submit_selector: null
+  continue_selector: null
+  sso_button_selector:
+    strategy: role_name
+    value: button
+    role: button
+    name: Sign in with Microsoft
+    nth: null
+  requires_external_completion: false
+  success_indicator_url_contains: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net
+  success_indicator_text: null
+  setup_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\auth_setup\test_auth_setup.py
+  storage_state_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\.auth\user.json
+  last_run_at: null
+  status: steps_ready
+  notes: []
+nodes:
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/home:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/home
+    slug: home
+    kind: unknown
+    requires_auth: true
+    depends_on: []
+    redirects_to: null
+    status: complete
+    extraction_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\manifest\extractions\home.json
+    plan_path: null
+    pom_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\pages\home_page.py
+    feature_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\features\home.feature
+    steps_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\steps\test_home.py
+    last_fingerprint: eded5ad77a8e9861
+    last_run_at: null
+    last_verified_at: null
+    last_pytest_outcome: ''
+    heal_attempts: 0
+    notes:
+    - auth_gated_trusted_from_env_login_url
+    - skipped_generation_awaiting_auth_session
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/stewie:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/stewie
+    slug: stewie
+    kind: unknown
+    requires_auth: true
+    depends_on: []
+    redirects_to: null
+    status: complete
+    extraction_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\manifest\extractions\stewie.json
+    plan_path: null
+    pom_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\pages\stewie_page.py
+    feature_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\features\stewie.feature
+    steps_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\steps\test_stewie.py
+    last_fingerprint: ca5b019fb2920ee6
+    last_run_at: null
+    last_verified_at: null
+    last_pytest_outcome: ''
+    heal_attempts: 0
+    notes:
+    - auth_gated_trusted_from_env_login_url
+    - skipped_generation_awaiting_auth_session
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/catalog:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/catalog
+    slug: catalog
+    kind: unknown
+    requires_auth: true
+    depends_on: []
+    redirects_to: null
+    status: complete
+    extraction_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\manifest\extractions\catalog.json
+    plan_path: null
+    pom_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\pages\catalog_page.py
+    feature_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\features\catalog.feature
+    steps_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\steps\test_catalog.py
+    last_fingerprint: 025fb59817e610ae
+    last_run_at: null
+    last_verified_at: null
+    last_pytest_outcome: ''
+    heal_attempts: 0
+    notes:
+    - auth_gated_trusted_from_env_login_url
+    - skipped_generation_awaiting_auth_session
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/source-connection:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/source-connection
+    slug: source_connection
+    kind: unknown
+    requires_auth: true
+    depends_on: []
+    redirects_to: null
+    status: complete
+    extraction_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\manifest\extractions\source_connection.json
+    plan_path: null
+    pom_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\pages\source_connection_page.py
+    feature_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\features\source_connection.feature
+    steps_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\steps\test_source_connection.py
+    last_fingerprint: a2bb39756dd0dd7d
+    last_run_at: null
+    last_verified_at: null
+    last_pytest_outcome: ''
+    heal_attempts: 0
+    notes:
+    - auth_gated_trusted_from_env_login_url
+    - skipped_generation_awaiting_auth_session
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/dq/insights:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/dq/insights
+    slug: dq_insights
+    kind: unknown
+    requires_auth: true
+    depends_on: []
+    redirects_to: null
+    status: complete
+    extraction_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\manifest\extractions\dq_insights.json
+    plan_path: null
+    pom_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\pages\dq_insights_page.py
+    feature_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\features\dq_insights.feature
+    steps_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\steps\test_dq_insights.py
+    last_fingerprint: a4e4f1cc835f956c
+    last_run_at: null
+    last_verified_at: null
+    last_pytest_outcome: ''
+    heal_attempts: 0
+    notes:
+    - auth_gated_trusted_from_env_login_url
+    - skipped_generation_awaiting_auth_session
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/sources:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/sources
+    slug: sources
+    kind: unknown
+    requires_auth: true
+    depends_on: []
+    redirects_to: null
+    status: complete
+    extraction_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\manifest\extractions\sources.json
+    plan_path: null
+    pom_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\pages\sources_page.py
+    feature_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\features\sources.feature
+    steps_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\steps\test_sources.py
+    last_fingerprint: 74d8c4c843bcb1e2
+    last_run_at: null
+    last_verified_at: null
+    last_pytest_outcome: ''
+    heal_attempts: 0
+    notes:
+    - auth_gated_trusted_from_env_login_url
+    - skipped_generation_awaiting_auth_session
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/agent:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/agent
+    slug: agent
+    kind: unknown
+    requires_auth: true
+    depends_on: []
+    redirects_to: null
+    status: needs_implementation
+    extraction_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\manifest\extractions\agent.json
+    plan_path: null
+    pom_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\pages\agent_page.py
+    feature_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\features\agent.feature
+    steps_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\steps\test_agent.py
+    last_fingerprint: 49de267f9248e3f1
+    last_run_at: null
+    last_verified_at: null
+    last_pytest_outcome: ''
+    heal_attempts: 0
+    notes:
+    - auth_gated_trusted_from_env_login_url
+    - skipped_generation_awaiting_auth_session
+  https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/security:
+    url: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/security
+    slug: security
+    kind: unknown
+    requires_auth: true
+    depends_on: []
+    redirects_to: null
+    status: complete
+    extraction_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\manifest\extractions\security.json
+    plan_path: null
+    pom_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\pages\security_page.py
+    feature_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\features\security.feature
+    steps_path: C:\Optimizing_autocoder-2.0\suryansh_repo\autocoder\tests\steps\test_security.py
+    last_fingerprint: d8828708e0fa9f60
+    last_run_at: null
+    last_verified_at: null
+    last_pytest_outcome: ''
+    heal_attempts: 0
+    notes:
+    - auth_gated_trusted_from_env_login_url
+    - skipped_generation_awaiting_auth_session
+updated_at: '2026-04-20T08:53:21+00:00'

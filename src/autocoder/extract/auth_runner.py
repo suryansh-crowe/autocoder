@@ -790,8 +790,59 @@ def run_auth(
                     },
                 )
 
+            # Capture storage + sessionStorage BEFORE any navigation.
+            # MSAL.js keeps the authenticated account in sessionStorage;
+            # if the app's router has an auth-guard loop that redirects
+            # /login → / → /login, navigating now might race the guard
+            # and wipe the freshly-written MSAL keys. Snapshot what's
+            # currently there while the browser is at the post-OAuth
+            # return URL — every cookie, localStorage entry, and
+            # sessionStorage account lives on the app's origin at this
+            # point, so the capture is safe regardless of which route
+            # the SPA happens to be rendering.
             sess.context.storage_state(path=str(storage_path))
             _save_session_storage(active, storage_path)
+
+            # Post-success escape (best-effort): if we ended on /login
+            # (the app's 404 for authenticated users), nudge the visible
+            # window to BASE_URL so the user sees a live authenticated
+            # page instead of the 404 while extraction starts. This is
+            # UX only — storage is already saved above, so the run is
+            # successful whether or not this settles.
+            try:
+                current_url = active.url or ""
+            except Exception:
+                current_url = ""
+            if (
+                settings.base_url
+                and "/login" in current_url
+                and "login.microsoftonline.com" not in current_url
+            ):
+                logger.info(
+                    "auth_escape_login_404",
+                    from_url=logger.safe_url(current_url),
+                    to=logger.safe_url(settings.base_url),
+                    hint=(
+                        "SSO finished but the app redirected back to /login "
+                        "(404 for authenticated users). Storage is already "
+                        "captured; nudging the visible window to BASE_URL "
+                        "for UX. If the app's MSAL router loops back to "
+                        "/login, that is an app-side bug — extraction will "
+                        "replay sessionStorage on each URL regardless."
+                    ),
+                )
+                try:
+                    active.goto(settings.base_url, wait_until="domcontentloaded", timeout=20_000)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warn(
+                        "auth_escape_login_404_failed",
+                        err=str(exc),
+                        hint=(
+                            "navigation away from /login did not complete; "
+                            "storage_state is still saved from the earlier "
+                            "authenticated return"
+                        ),
+                    )
             if on_storage_saved is not None:
                 try:
                     on_storage_saved(str(storage_path))
