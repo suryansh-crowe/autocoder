@@ -113,6 +113,7 @@ class OllamaClient:
         in_tokens = 0
         out_tokens = 0
         last_progress_log = start
+        first_chunk_at: float | None = None
         final_envelope: dict[str, Any] | None = None
         try:
             with self._client.stream("POST", "/api/chat", json=payload) as r:
@@ -148,9 +149,23 @@ class OllamaClient:
                     msg = envelope.get("message") or {}
                     fragment = msg.get("content") or ""
                     if fragment:
+                        if first_chunk_at is None:
+                            first_chunk_at = time.monotonic()
+                            logger.info(
+                                "ollama_first_chunk",
+                                purpose=purpose,
+                                prompt_eval_s=f"{first_chunk_at - start:.1f}",
+                                hint=(
+                                    "prompt evaluation finished; tokens now "
+                                    "streaming. The quiet window before this "
+                                    "was CPU prompt-eval, not a hang."
+                                ),
+                            )
                         chunks.append(fragment)
                     # Heartbeat: log every ~10 s so a long CPU run
-                    # doesn't look hung.
+                    # doesn't look hung. Before the first token this
+                    # shows 0 chars (prompt-eval still running); after,
+                    # it shows accumulating output.
                     now = time.monotonic()
                     if now - last_progress_log >= 10.0:
                         last_progress_log = now
@@ -159,12 +174,25 @@ class OllamaClient:
                             purpose=purpose,
                             elapsed_s=f"{now - start:.1f}",
                             chars=sum(len(c) for c in chunks),
+                            phase="gen" if first_chunk_at else "prompt_eval",
                         )
                     if envelope.get("done"):
                         final_envelope = envelope
                         break
         except httpx.HTTPError as exc:
-            logger.error("ollama_http_error", purpose=purpose, err=str(exc))
+            logger.error(
+                "ollama_http_error",
+                purpose=purpose,
+                err=str(exc),
+                err_type=type(exc).__name__,
+                elapsed_s=f"{time.monotonic() - start:.1f}",
+                hint=(
+                    "If this fired BEFORE the first `ollama_first_chunk` "
+                    "event, the model's prompt-evaluation phase exceeded "
+                    "OLLAMA_TIMEOUT_SECONDS. Raise it (30+ min) or lower "
+                    "OLLAMA_NUM_CTX."
+                ),
+            )
             raise OllamaError(f"Ollama HTTP error: {exc!s}") from exc
 
         elapsed = time.monotonic() - start

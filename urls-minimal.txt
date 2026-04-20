@@ -1,0 +1,10 @@
+# Minimal URL list — the /login URL comes from LOGIN_URL in .env
+# and is handled by the auth-first stage. All that's left to generate
+# tests for is /catalog.
+#
+# Run with:  autocoder run --urls-file urls-minimal.txt
+#
+# Full URL list is in urls.txt; use that when you want tests for all
+# eight pages.
+
+https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/catalog

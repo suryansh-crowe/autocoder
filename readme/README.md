@@ -61,6 +61,7 @@ codebase state so the findings stay interpretable over time.
 | Date | Report |
 |------|--------|
 | 2026-04-18 | [16_run_report_2026-04-18.md](16_run_report_2026-04-18.md) — first end-to-end run; 3 attempts; 5 bugs found and fixed; both URLs reached `complete`; 4 048 tokens spent. |
+| 2026-04-20 | [19_local_llm_report_2026-04-20.md](19_local_llm_report_2026-04-20.md) — why Phi-4 14B on CPU was hitting HTTP timeouts (`feature_plan` vs 600 s idle read), what was changed (`OLLAMA_TIMEOUT_SECONDS=1800`, `OLLAMA_NUM_CTX=4096`, streaming client), and expected CPU wall-clock per URL. |
 
 ## Source-of-truth ordering
 
