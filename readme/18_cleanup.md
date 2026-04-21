@@ -9,25 +9,22 @@ regenerate from scratch.
 
 | Path | Why |
 |------|-----|
-| `tests/features/*.feature` | Generated Gherkin features |
-| `tests/steps/test_*.py` | Generated pytest-bdd step modules |
-| `tests/pages/*_page.py` (except `base_page.py`) | Generated Page Object Models |
-| `manifest/extractions/` | Cached page extractions |
-| `manifest/plans/` | Cached POM + feature LLM plans |
-| `manifest/heals/` | Cached stub-heal and failure-heal LLM suggestions |
-| `manifest/runs/` | JUnit XML from previous verification passes |
-| `manifest/registry.yaml` | The URL registry — wipe to forget every URL |
-| `manifest/report.html` | Last HTML report from `autocoder report --html` |
+| `tests/generated/generated_*/` | Every per-run folder — generated tests, POMs, features, xml, and the run's own `manifest/` (registry, extractions, plans, heals, logs). Self-contained; no shared cache elsewhere. |
 | `.auth/user.json` | Playwright `storage_state` (cookies, localStorage) |
 | `.auth/user.session_storage.json` | MSAL / SPA sessionStorage snapshot |
-| `tests/__pycache__/`, `tests/pages/__pycache__/`, `tests/steps/__pycache__/` | Stale bytecode that can confuse pytest after regen |
+| `tests/__pycache__/`, `tests/generated/**/__pycache__/` | Stale bytecode that can confuse pytest after regen |
+
+There is no root-level `manifest/` directory to clean — every run
+folder carries its own. If an older version of the tool re-created
+one, it is still gitignored and safe to delete.
 
 ## What to preserve
 
 Do **not** delete these — they are hand-written framework/scaffolding:
 
-- `tests/pages/base_page.py`
-- `tests/__init__.py`, `tests/pages/__init__.py`, `tests/steps/__init__.py`
+- `tests/pages/base_page.py` — shared Playwright helper POMs extend.
+- `tests/generated/__init__.py`, `tests/generated/conftest.py` — latest-bundle filter.
+- `tests/__init__.py`, `tests/pages/__init__.py`
 - `tests/conftest.py`
 - `tests/support/`
 - `tests/unit/`
@@ -41,59 +38,29 @@ Do **not** delete these — they are hand-written framework/scaffolding:
 
 ```bash
 rm -rvf \
-  tests/features/*.feature \
-  tests/steps/test_*.py \
-  tests/pages/agent_page.py \
-  tests/pages/catalog_page.py \
-  tests/pages/dq_insights_page.py \
-  tests/pages/home_page.py \
-  tests/pages/security_page.py \
-  tests/pages/source_connection_page.py \
-  tests/pages/sources_page.py \
-  tests/pages/stewie_page.py \
-  manifest/extractions \
-  manifest/plans \
-  manifest/heals \
-  manifest/runs \
-  manifest/registry.yaml \
-  manifest/report.html \
+  tests/generated/generated_* \
   .auth/user.json \
   .auth/user.session_storage.json \
   tests/__pycache__ \
-  tests/pages/__pycache__ \
-  tests/steps/__pycache__
+  tests/generated/__pycache__
 ```
 
-Enumerating each `_page.py` file by name is intentional — a blind
-`tests/pages/*_page.py` glob would also match `base_page.py`, which you
-want to keep. If you add new URLs, add the corresponding POM filenames
-to the command.
+The bundle layout makes cleanup a one-line glob — every generated
+artefact AND every manifest artefact is under
+`tests/generated/generated_*/`, so there is no risk of matching the
+hand-written `base_page.py`. Running a fresh `autocoder generate`
+after this produces a brand-new run folder that starts cold (no
+prior seed to copy from).
 
 ### PowerShell
 
 ```powershell
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue `
-  tests/features/*.feature, `
-  tests/steps/test_*.py, `
-  tests/pages/agent_page.py, `
-  tests/pages/catalog_page.py, `
-  tests/pages/dq_insights_page.py, `
-  tests/pages/home_page.py, `
-  tests/pages/security_page.py, `
-  tests/pages/source_connection_page.py, `
-  tests/pages/sources_page.py, `
-  tests/pages/stewie_page.py, `
-  manifest/extractions, `
-  manifest/plans, `
-  manifest/heals, `
-  manifest/runs, `
-  manifest/registry.yaml, `
-  manifest/report.html, `
+  tests/generated/generated_*, `
   .auth/user.json, `
   .auth/user.session_storage.json, `
   tests/__pycache__, `
-  tests/pages/__pycache__, `
-  tests/steps/__pycache__
+  tests/generated/__pycache__
 ```
 
 `-ErrorAction SilentlyContinue` means missing files don't abort the
@@ -102,26 +69,26 @@ command — safe to run on a partially-clean tree.
 ## Verify the slate is clean
 
 ```bash
-ls tests/features tests/pages tests/steps manifest/ .auth/
+ls tests/generated tests/pages .auth/
 ```
 
 Expected:
 
 ```
-tests/features:
+tests/generated:
+__init__.py
+conftest.py
 
 tests/pages:
 __init__.py
 base_page.py
 
-tests/steps:
-__init__.py
-
-manifest/:
-logs
-
 .auth/:
 ```
+
+No stray `manifest/` anywhere — the next `autocoder generate`
+creates a fresh run folder under `tests/generated/` that contains
+its own `manifest/`.
 
 ## Regenerate from zero
 
@@ -132,25 +99,36 @@ autocoder report --run --html manifest/report.html
 
 The first command classifies every URL, performs SSO (browser pops
 up because `.auth/user.json` is gone), extracts the authenticated
-DOM, generates POMs / features / steps / auth-setup, and auto-heals
-any unresolved step bodies. The second runs pytest, parses the JUnit
-XML, and writes a standalone HTML dashboard.
+DOM, generates POMs / features / steps / auth-setup into a fresh
+`tests/generated/generated_<timestamp>/` folder, and auto-heals any
+unresolved step bodies. The second runs pytest, parses the JUnit
+XML from the bundle, and writes a standalone HTML dashboard.
 
 ## Partial cleans
 
 When you only want a subset, pick the lines above that apply. Common
 cases:
 
-- **Forget one URL** — delete its `tests/pages/<slug>_page.py`,
-  `tests/features/<slug>.feature`, `tests/steps/test_<slug>.py`,
-  `manifest/extractions/<slug>.json`, `manifest/extractions/<slug>.prev.json`,
-  `manifest/runs/<slug>.xml`, and the `nodes: <url>:` block in
-  `manifest/registry.yaml`.
-- **Force LLM to re-plan without re-auth** — delete `manifest/plans/`
-  and `manifest/heals/`. Keep `.auth/` so you don't have to sign in
-  again. Then re-run with `--force`.
-- **Keep generation but re-run tests** — delete `manifest/runs/` only,
-  then `autocoder report --run`.
+- **Forget one URL** — in the latest run folder
+  (`tests/generated/generated_<ts>/`), delete the slug's subfolder
+  (`<slug>/`), the two extraction files under
+  `manifest/extractions/<slug>.{json,prev.json}`, and the
+  `nodes: <url>:` block in `manifest/registry.yaml`. Historical run
+  folders can be left alone — the `conftest.py` filter already
+  ignores them.
+- **Force LLM to re-plan without re-auth** — in the latest run
+  folder, delete `manifest/plans/` and `manifest/heals/`. Keep
+  `.auth/` so you don't have to sign in again. Then re-run with
+  `--force`. The next run will seed the empty plan caches from this
+  (partially cleared) latest run and ask the LLM fresh.
+- **Keep generation but re-run tests** — just re-run
+  `autocoder report --run`; pytest writes a fresh `results.xml` into
+  each latest bundle folder.
+- **Keep only the latest run folder** — `ls -d tests/generated/generated_*`
+  to see them all, then delete older ones by name. The `conftest.py`
+  filter ignores older folders regardless; deletion is purely a disk
+  hygiene choice. Each run folder is self-contained, so deleting
+  older ones never removes data the latest run relies on.
 
 ## Auth-only reset (`autocoder auth-reset`)
 

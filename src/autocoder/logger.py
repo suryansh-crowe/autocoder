@@ -57,6 +57,7 @@ def init(
     level: str | None = None,
     *,
     command: str | None = None,
+    force_reopen: bool = False,
 ) -> None:
     """Configure the console + per-invocation log file.
 
@@ -75,17 +76,31 @@ def init(
     Idempotent within a process: the **first** call that establishes
     a file handle wins. Later calls only refresh the level threshold,
     so the orchestrator's `init` after the CLI's `init` doesn't open
-    a second file.
+    a second file — unless ``force_reopen=True``, in which case the
+    existing handle is closed and a fresh one is opened at the new
+    ``log_target``. ``force_reopen`` is used by ``run_generate`` and
+    its sibling entry points once they rescope ``settings`` to the
+    per-run manifest folder, so the log lands next to the artefacts
+    it describes rather than in the root-level log folder the CLI
+    pointed at first.
 
     Always safe to call multiple times.
     """
     global _console, _file_handle, _active_log_path, _min_level
     _console = Console(stderr=True, highlight=False, soft_wrap=True)
-    if log_target is not None and _file_handle is None:
-        path = _resolve_log_path(log_target, command)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _file_handle = path.open("a", encoding="utf-8")
-        _active_log_path = path
+    if log_target is not None:
+        if force_reopen and _file_handle is not None:
+            try:
+                _file_handle.close()
+            except Exception:  # noqa: BLE001
+                pass
+            _file_handle = None
+            _active_log_path = None
+        if _file_handle is None:
+            path = _resolve_log_path(log_target, command)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _file_handle = path.open("a", encoding="utf-8")
+            _active_log_path = path
     chosen = (level or os.environ.get("LOG_LEVEL", "info")).strip().lower()
     _min_level = _LEVELS.get(chosen, _LEVELS["info"])
 

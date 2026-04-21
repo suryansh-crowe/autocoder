@@ -29,7 +29,16 @@ from pathlib import Path
 from typing import Iterable
 
 from autocoder import logger
-from autocoder.config import Settings, ensure_dirs
+from autocoder.config import (
+    Settings,
+    bundle_dir_for,
+    ensure_dirs,
+    ensure_run_dir,
+    latest_bundle_for,
+    run_dir_for,
+    scope_settings_to_run,
+    seed_manifest_from_previous_run,
+)
 from autocoder.extract.auth_probe import build_auth_spec
 from autocoder.extract.auth_runner import run_auth
 from autocoder.extract.browser import (
@@ -152,9 +161,40 @@ class StageResult:
 
 
 def run_generate(settings: Settings, opts: GenerateOptions) -> list[StageResult]:
-    """Main entry point used by ``autocoder generate``."""
+    """Main entry point used by ``autocoder generate``.
+
+    The run folder is its own manifest root. At entry we:
+
+    1. Compute a ``run_stamp`` shared by every slug emitted this cycle.
+    2. Copy the previous run's ``manifest/`` into the new run folder
+       as a seed so fingerprint-based cache hits still skip the LLM.
+    3. Rescope ``settings`` so every manifest path
+       (``manifest_dir`` / ``extractions_dir`` / ``plans_dir`` /
+       ``logs_dir`` / ``registry_path``) lives inside
+       ``tests/generated/generated_<stamp>/manifest/``.
+
+    From that point on, nothing is written to the root-level
+    ``manifest/`` directory — each run folder is a self-contained,
+    movable record of the invocation that produced it.
+    """
+    import datetime as _dt
+
+    # Step 1: compute stamp and create the run folder shell.
+    run_stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    ensure_run_dir(settings, run_stamp)
+
+    # Step 2: seed the new run's manifest from the previous run's
+    # manifest so unchanged slugs keep their cached plans / heals.
+    seeded = seed_manifest_from_previous_run(settings, run_stamp)
+
+    # Step 3: rescope. Every settings.paths.* below this line points
+    # inside the run folder.
+    settings = scope_settings_to_run(settings, run_stamp)
+
     ensure_dirs(settings)
-    logger.init(settings.paths.logs_dir, level=settings.log_level)
+    # Force the logger onto the per-run path even if the CLI opened a
+    # handle at the root-level manifest/logs/ before we rescoped.
+    logger.init(settings.paths.logs_dir, level=settings.log_level, force_reopen=True)
     run_started = time.monotonic()
     logger.stage(
         "run_start",
@@ -164,6 +204,8 @@ def run_generate(settings: Settings, opts: GenerateOptions) -> list[StageResult]
         skip_llm=opts.skip_llm,
         log_level=settings.log_level,
         manifest=str(settings.paths.manifest_dir),
+        run_stamp=run_stamp,
+        seeded_from_prior=seeded,
     )
 
     store = RegistryStore(settings.paths.registry_path)
@@ -309,7 +351,8 @@ def run_generate(settings: Settings, opts: GenerateOptions) -> list[StageResult]
 
                 try:
                     result = _process_url(
-                        node, registry, settings, store, client, opts, shared=shared
+                        node, registry, settings, store, client, opts,
+                        run_stamp=run_stamp, shared=shared,
                     )
                 except Exception as exc:  # noqa: BLE001
                     # One URL must not be able to abort the whole run.
@@ -413,10 +456,18 @@ def _run_pytest_for_slug(slug: str, settings: Settings) -> PytestOutcome:
     """Run pytest for a single slug's test module and return pass/fail."""
     from autocoder.heal.pytest_failures import run_pytest_capture
 
-    test_file = settings.paths.steps_dir / f"test_{slug}.py"
-    junit_dir = settings.paths.manifest_dir / "runs"
-    junit_dir.mkdir(parents=True, exist_ok=True)
-    junit_path = junit_dir / f"{slug}.xml"
+    bundle = latest_bundle_for(settings, slug)
+    if bundle is None:
+        # Legacy flat layout fallback.
+        legacy_test = settings.paths.steps_dir / f"test_{slug}.py"
+        bundle = legacy_test.parent
+        test_file = legacy_test
+        junit_path = settings.paths.manifest_dir / "runs" / f"{slug}.xml"
+        junit_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        test_file = bundle / f"test_{slug}.py"
+        bundle.mkdir(parents=True, exist_ok=True)
+        junit_path = bundle / "results.xml"
     if not test_file.exists():
         logger.warn("pytest_skipped_missing", slug=slug, path=str(test_file))
         return PytestOutcome(slug=slug, passed=False, failure_count=0, junit_path=junit_path)
@@ -1053,6 +1104,7 @@ def _process_url(
     client,  # OllamaClient | AzureOpenAIClient | None — typed loosely on purpose
     opts: GenerateOptions,
     *,
+    run_stamp: str,
     shared: BrowserSession | None = None,
 ) -> StageResult:
     issues: list[str] = []
@@ -1245,7 +1297,12 @@ def _process_url(
         cache_dir=settings.paths.plans_dir,
         force=opts.force,
     )
-    pom_path = settings.paths.pages_dir / f"{node.slug}_page.py"
+    bundle = bundle_dir_for(settings, node.slug, run_stamp)
+    bundle.mkdir(parents=True, exist_ok=True)
+    # Marker so pytest treats the bundle as a package and walks up into
+    # ``tests/`` — keeps ``from tests.pages.base_page`` etc. resolvable.
+    (bundle / "__init__.py").touch(exist_ok=True)
+    pom_path = bundle / f"{node.slug}_page.py"
     existed = pom_path.exists()
     pom_path.write_text(render_pom(pom_plan, extraction), encoding="utf-8")
     node.pom_path = str(pom_path)
@@ -1272,7 +1329,7 @@ def _process_url(
         cache_dir=settings.paths.plans_dir,
         force=opts.force,
     )
-    feature_path = settings.paths.features_dir / f"{node.slug}.feature"
+    feature_path = bundle / f"{node.slug}.feature"
     existed = feature_path.exists()
     feature_path.write_text(render_feature(feature_plan), encoding="utf-8")
     node.feature_path = str(feature_path)
@@ -1298,8 +1355,11 @@ def _process_url(
             title=scn.title,
         )
 
-    steps_path = settings.paths.steps_dir / f"test_{node.slug}.py"
-    rel_feature = feature_path.relative_to(settings.paths.features_dir)
+    steps_path = bundle / f"test_{node.slug}.py"
+    # Feature sits next to the test file inside the bundle, so the
+    # ``scenarios(...)`` call gets a bare filename and pytest-bdd
+    # resolves it relative to the test module.
+    rel_feature = feature_path.name
     existed = steps_path.exists()
     rendered_steps = render_steps(
         feature_title=feature_plan.feature,
@@ -1308,6 +1368,7 @@ def _process_url(
         pom_plan=pom_plan,
         pom_module=f"{node.slug}_page",
         elements=list(extraction.elements),
+        run_stamp=run_stamp,
     )
     # Syntax-check the rendered module before writing. A single bad
     # step — e.g. a string argument joined as a bare identifier —

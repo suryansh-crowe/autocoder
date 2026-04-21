@@ -83,7 +83,22 @@
       "Bash(powershell -Command 'Get-Process | Where-Object { $_.ProcessName -like '\\\\''*ollama*'\\\\'' } | Stop-Process -Force')",
       "Bash(docker start *)",
       "Bash(sed -n '48,60p' manifest/logs/20260420-221944-run.log)",
-      "Bash(sed -n '95,115p' manifest/logs/20260420-221944-run.log)"
+      "Bash(sed -n '95,115p' manifest/logs/20260420-221944-run.log)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/autocoder/orchestrator.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('src/autocoder/config.py', encoding='utf-8'\\).read\\(\\)\\); print\\('ok'\\)\")",
+      "Bash(python -c \"from autocoder.config import load_settings, ensure_dirs; s = load_settings\\(\\); print\\('generated_dir:', s.paths.generated_dir\\); ensure_dirs\\(s\\); print\\('exists:', s.paths.generated_dir.exists\\(\\)\\)\")",
+      "Bash(python -c \"from autocoder.orchestrator import _archive_generated_bundle; from autocoder.config import load_settings; from autocoder import logger; from pathlib import Path; s=load_settings\\(\\); _archive_generated_bundle\\(settings=s, slug='home', pom_path=s.paths.pages_dir/'home_page.py', feature_path=s.paths.features_dir/'home.feature', steps_path=s.paths.steps_dir/'test_home.py', logger=logger\\); import os; [print\\(p\\) for p in sorted\\(os.listdir\\(s.paths.generated_dir\\)\\)]\")",
+      "Bash(python -)",
+      "Bash(python -m pytest --collect-only -q tests/generated/home/)",
+      "Bash(python -m pytest --collect-only -q tests/generated/)",
+      "Bash(python -m pytest --collect-only -q tests/)",
+      "WebSearch",
+      "Bash(python -m pytest --collect-only tests/)",
+      "Bash(rm -rf \"tests/generated/generated_20260420_080000/home/__pycache__\")",
+      "Bash(rm -rf \"tests/generated/generated_20260420_080000\")",
+      "Bash(cat .gitignore)",
+      "Bash(ls readme/)",
+      "Bash(ls *.md)",
+      "Bash(grep -v \"^manifest$\")"
     ]
   },
   "disabledMcpjsonServers": [

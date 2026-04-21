@@ -39,7 +39,7 @@ Console:
 
 ```
  info classify_done nodes=3 login_detected=True kind_login=1 kind_redirect_to_login=2
-   ok pom_written slug=dashboard path=tests/pages/dashboard_page.py action=created methods=8
+   ok pom_written slug=dashboard path=tests/generated/generated_20260421_143022/dashboard/dashboard_page.py action=created methods=8
  warn feature_plan_issue fixture=dashboard_page msg=duplicate scenario title dropped: User opens dashboard
 ```
 

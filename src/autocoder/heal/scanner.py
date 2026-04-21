@@ -100,12 +100,16 @@ def _fixture_param(args: ast.arguments) -> tuple[str, str] | None:
 
 
 def _pom_module_from_imports(tree: ast.Module) -> str | None:
-    """Return the module name imported as `from tests.pages.X import Y`."""
+    """Return the module name imported as ``from tests.pages.X import Y``
+    (legacy layout) or ``from tests.generated.<slug>.X import Y`` (the
+    per-slug bundle layout). Either form yields ``X``.
+    """
     for node in tree.body:
         if not isinstance(node, ast.ImportFrom):
             continue
-        if node.module and node.module.startswith("tests.pages."):
-            return node.module.split(".")[-1]
+        mod = node.module or ""
+        if mod.startswith("tests.pages.") or mod.startswith("tests.generated."):
+            return mod.split(".")[-1]
     return None
 
 
@@ -157,12 +161,21 @@ def find_stubs_in_dir(dir_path: Path, *, slug: str | None = None) -> list[StubIn
     """Walk `dir_path` for `test_*.py` files and collect every stub.
 
     When ``slug`` is supplied, restrict to ``test_<slug>.py`` only.
+
+    Recurses into subdirectories so the per-slug bundle layout
+    (``tests/generated/<slug>/test_<slug>.py``) is covered alongside
+    the legacy flat ``tests/steps/`` layout.
     """
     if not dir_path.is_dir():
         return []
     pattern = f"test_{slug}.py" if slug else "test_*.py"
+    seen: set[Path] = set()
     out: list[StubInfo] = []
-    for f in sorted(dir_path.glob(pattern)):
+    for f in sorted(dir_path.rglob(pattern)):
+        resolved = f.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
         out.extend(find_stubs_in_file(f))
     return out
 

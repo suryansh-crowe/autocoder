@@ -20,7 +20,7 @@ remain available for offline / fine-grained workflows. After a run,
 `autocoder report --html manifest/report.html` renders a browser-
 viewable dashboard with per-URL component detection, per-scenario
 pass/fail, and overall totals — also regenerated automatically at
-the end of every `pytest tests/steps` session.
+the end of every `pytest tests/generated` session.
 
 Need to force a re-login without wiping your generated tests?
 `autocoder auth-reset` deletes just the captured session files

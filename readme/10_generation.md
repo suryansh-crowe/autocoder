@@ -8,7 +8,13 @@ consume.
 
 ## POM render
 
-`autocoder/generate/pom.py` writes `tests/pages/<slug>_page.py`:
+Every `autocoder generate` invocation produces a run-level folder
+`tests/generated/generated_<YYYYMMDD_HHMMSS>/`. Each URL becomes a
+bundle subfolder inside that run folder; the three renderers below
+write directly into that bundle. Throughout this doc `<run>` is
+shorthand for `generated_<timestamp>`.
+
+`autocoder/generate/pom.py` writes `tests/generated/<run>/<slug>/<slug>_page.py`:
 
 ```python
 class DashboardPage(BasePage):
@@ -52,7 +58,7 @@ Action → body mapping is:
 
 ## Feature render
 
-`autocoder/generate/feature.py` writes `tests/features/<slug>.feature`.
+`autocoder/generate/feature.py` writes `tests/generated/<run>/<slug>/<slug>.feature`.
 Tiers map to Gherkin tags:
 
 | Tier         | Tag(s)                       |
@@ -92,7 +98,7 @@ Feature: Sign in
 
 ## Steps render
 
-`autocoder/generate/steps.py` writes `tests/steps/test_<slug>.py`.
+`autocoder/generate/steps.py` writes `tests/generated/<run>/<slug>/test_<slug>.py`.
 Files are deliberately named `test_*.py` so pytest's default
 collection picks them up.
 
@@ -207,7 +213,7 @@ Fall-through: `raise NotImplementedError("Implement step: …")`.
 
 ### Pre-write syntax guard
 
-Immediately before `tests/steps/test_<slug>.py` is written, the
+Immediately before `tests/generated/<run>/<slug>/test_<slug>.py` is written, the
 orchestrator runs `ast.parse()` on the rendered string. A single
 bad step — e.g. a literal argument joined as a bare identifier —
 would otherwise make the whole module un-collectable and block

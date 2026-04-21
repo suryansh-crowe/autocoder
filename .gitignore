@@ -22,12 +22,21 @@ playwright-report/
 test-results/
 trace.zip
 
-# Manifest payloads (registry stays; raw extractions/plans/logs/heals do not)
-manifest/extractions/
-manifest/plans/
-manifest/heals/
-manifest/logs/
-manifest/.cache/
+# Manifest — no longer lives at the project root. Each run folder is
+# its own manifest root (``tests/generated/generated_*/manifest/``),
+# so the root-level ``manifest/`` is not written by the current code.
+# Kept here as a safety net: if an older version of the tool recreates
+# it, the stray directory stays out of git.
+manifest/
+
+# Generated per-run test bundles. One ``generated_<YYYYMMDD_HHMMSS>/``
+# folder is written per ``autocoder generate`` invocation and is
+# entirely self-contained — it carries the feature, test, page, and
+# JUnit xml for each slug PLUS a ``manifest/`` subfolder with that
+# run's registry, extractions, plans, heals, and logs. Never tracked:
+# everything here is reproducible from the previous run's manifest
+# seed + a fresh ``autocoder generate``.
+tests/generated/generated_*/
 
 # Editors / OS
 .vscode/

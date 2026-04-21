@@ -353,7 +353,7 @@ that constrain the LLM's output:
 
 * **`forbidden_element_ids`** — element ids that prior When/And
   steps in the same scenario already clicked or filled. Computed
-  by parsing the `tests/features/<slug>.feature` file
+  by parsing the slug's newest `tests/generated/<run>/<slug>/<slug>.feature` file
   (`_scenario_prior_step_texts`) and fuzzy-matching each prior
   step text to a POM method's `element_id` or the extraction
   catalog (`_compute_forbidden_ids` in `heal/runner.py`). The LLM
@@ -505,7 +505,7 @@ still references the POM class, so:
 
 - The POM file still renders (the user does not lose a working POM to
   a bad LLM response).
-- `tests/features/<slug>.feature` renders with one placeholder smoke
+- `tests/generated/<run>/<slug>/<slug>.feature` renders with one placeholder smoke
   scenario and a clear fallback description.
 - The URL ends up as `needs_implementation` via the quality gate, not
   `failed`, so `autocoder generate --force` / `autocoder heal` can

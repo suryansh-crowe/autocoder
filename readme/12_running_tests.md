@@ -7,12 +7,17 @@ touches the suite when you ask it to (re)generate or heal.
 ## Generation → heal → run loop
 
 ```bash
-autocoder generate <urls>          # 1. generate POMs / features / steps
-autocoder heal --slug <slug>       # 2. fill NotImplementedError stubs
-pytest tests/steps/test_<slug>.py  # 3. run the suite
-autocoder heal --from-pytest --slug <slug>  # 4. heal runtime failures
-pytest tests/steps/test_<slug>.py  # 5. re-run; repeat 4-5 if needed
+autocoder generate <urls>                          # 1. generate POMs / features / steps into tests/generated/generated_<ts>/
+autocoder heal --slug <slug>                       # 2. fill NotImplementedError stubs
+pytest tests/generated/generated_*/<slug>/test_<slug>.py   # 3. run the suite
+autocoder heal --from-pytest --slug <slug>         # 4. heal runtime failures
+pytest tests/generated/generated_*/<slug>/test_<slug>.py   # 5. re-run; repeat 4-5 if needed
 ```
+
+The `tests/generated/conftest.py` filter keeps only the newest run
+folder per slug, so the `generated_*` glob above collects exactly one
+test file per slug even when historical run folders are still on
+disk.
 
 Step 4 captures every Playwright error and asks the LLM for a
 revised step body (with `failure_class` hints — disabled / modal /
@@ -92,13 +97,13 @@ pytest -m "auth or smoke"
 Run a single feature:
 
 ```bash
-pytest tests/steps/test_login.py
+pytest tests/generated/generated_*/login/test_login.py
 ```
 
 Run a single scenario:
 
 ```bash
-pytest tests/steps/test_login.py::test_user_signs_in_with_valid_credentials
+pytest tests/generated/generated_*/login/test_login.py::test_user_signs_in_with_valid_credentials
 ```
 
 (pytest-bdd derives the test function name from the scenario title.)
@@ -134,8 +139,10 @@ Produces a standalone, dark-themed HTML file showing, per URL:
   result;
 * **overall totals** and a pass rate.
 
-`--run` invokes pytest against every `tests/steps/test_*.py` and
-writes fresh `manifest/runs/<slug>.xml` first. Without `--run` the
+`--run` invokes pytest against every slug's newest-bundle test file
+and writes a fresh `tests/generated/<run>/<slug>/results.xml` in
+place first (legacy flat layouts still fall back to
+`manifest/runs/<slug>.xml`). Without `--run` the
 report reads whatever XML is already on disk (slugs that have
 never been tested show `unknown`). `--open/--no-open` controls
 whether the HTML file is opened in the default browser
@@ -192,7 +199,7 @@ is produced automatically by the pytest run above; the explicit
 ## Runtime self-heal on generated actions
 
 Generated POM methods call `self.click(id)` / `self.check(id)` /
-`self.fill(id, v)` / `self.select(id, v)` on `tests/pages/base_page.py`,
+`self.fill(id, v)` / `self.select(id, v)` on `tests/pages/base_page.py` (the hand-written base),
 not raw Playwright methods. `BasePage` provides a small deterministic
 self-heal layer:
 

@@ -126,7 +126,7 @@ deterministic.
                           ▼
 ┌────────────────────────────────────────────────────────────────┐
 │ 5. POM RENDER  autocoder/generate/pom.py                       │
-│   ─ writes      tests/pages/<slug>_page.py                     │
+│   ─ writes      tests/generated/<run>/<slug>/<slug>_page.py    │
 │   ─ extends     tests/pages/base_page.py                       │
 │   ─ contains    SELECTORS = {<id>: [primary, ...fallbacks]}    │
 │                 + one method per POMMethod (deterministic)     │
@@ -152,9 +152,9 @@ deterministic.
                           ▼
 ┌────────────────────────────────────────────────────────────────┐
 │ 7. RENDER FEATURE + STEPS    autocoder/generate/{feature,steps}│
-│   feature.py    → tests/features/<slug>.feature                │
+│   feature.py    → tests/generated/<run>/<slug>/<slug>.feature  │
 │                   (Gherkin, tier→tag mapping)                  │
-│   steps.py      → tests/steps/test_<slug>.py                   │
+│   steps.py      → tests/generated/<run>/<slug>/test_<slug>.py  │
 │                   (pytest-bdd; one decorator per unique step;  │
 │                    body = pom_method call with literal args    │
 │                    repr'd as Python strings, OR synthesized    │
@@ -213,14 +213,14 @@ deterministic.
 | 2. Auth-first  | `autocoder/extract/auth_probe.py` + `auth_runner.py` + `generate/auth_setup.py` | 0 | `tests/auth_setup/test_auth_setup.py` + `.auth/user.json` + populated `AuthSpec` |
 | 3. Extract     | `autocoder/extract/inspector.py`    | 0                  | `manifest/extractions/<slug>.json` (under session when auth is ready) |
 | 4. POM plan    | `autocoder/llm/plans.py`            | ~400 in / ~120 out | `manifest/plans/*.pom.<fp>.json` |
-| 5. POM render  | `autocoder/generate/pom.py`         | 0                  | `tests/pages/<slug>_page.py` |
+| 5. POM render  | `autocoder/generate/pom.py`         | 0                  | `tests/generated/<run>/<slug>/<slug>_page.py` |
 | 6. Feature plan| `autocoder/llm/plans.py`            | ~350 in / ~180 out | `manifest/plans/*.feature.<tiers>.<fp>.json` |
-| 7a. Feature    | `autocoder/generate/feature.py`     | 0                  | `tests/features/<slug>.feature` |
-| 7b. Steps      | `autocoder/generate/steps.py`       | 0                  | `tests/steps/test_<slug>.py` (+ quality gate + pre-write `ast.parse` guard) |
+| 7a. Feature    | `autocoder/generate/feature.py`     | 0                  | `tests/generated/<run>/<slug>/<slug>.feature` |
+| 7b. Steps      | `autocoder/generate/steps.py`       | 0                  | `tests/generated/<run>/<slug>/test_<slug>.py` (+ quality gate + pre-write `ast.parse` guard) |
 | **7c. Autoheal (inline)** | `autocoder/heal/runner.py` | ~250 in / ~30 out per stub (cached after first hit) | Replaces `NotImplementedError` stubs with validated one-statement LLM bodies right inside `run_generate`; respects `forbidden_element_ids` + trivial-URL rule |
 | 8. Persist     | `autocoder/registry/`               | 0                  | `registry.yaml` + `manifest/logs/<ts>-<cmd>.log` |
 | **9. Heal (standalone)** | `autocoder/heal/`         | ~250 in / ~30 out per stub; ~400 / ~80 per failure | Reruns the same heal flow out-of-band via `autocoder heal` / `autocoder heal --from-pytest` |
-| **10. Report (on demand)** | `autocoder/report.py`   | 0                  | `manifest/report.html` + `manifest/runs/<slug>.xml` when `--run` / `--html` is used, or automatically via the `pytest_sessionfinish` hook in `tests/conftest.py` |
+| **10. Report (on demand)** | `autocoder/report.py`   | 0                  | `manifest/report.html` + `tests/generated/<run>/<slug>/results.xml` when `--run` / `--html` is used (legacy flat layout writes to `manifest/runs/<slug>.xml`), or automatically via the `pytest_sessionfinish` hook in `tests/conftest.py` |
 
 ## Verification + heal loop (`autocoder run` only)
 
@@ -231,12 +231,13 @@ timing issues, DOM drift, assertion mismatches — get healed.
 
 ```
                     for every slug with status in (complete, needs_implementation)
-                    and a tests/steps/test_<slug>.py file on disk:
+                    and a tests/generated/<run>/<slug>/test_<slug>.py file on disk:
                              │
                              ▼
 ┌────────────────────────────────────────────────────────────────┐
 │ 9. VERIFY      autocoder/orchestrator.py:_run_pytest_for_slug  │
-│   ─ invokes `pytest tests/steps/test_<slug>.py` with a JUnit   │
+│   ─ invokes `pytest` on the latest bundle's test_<slug>.py     │
+│     (resolved via `latest_bundle_for`) with a JUnit            │
 │     report at manifest/runs/<slug>.xml                         │
 │   ─ parses failures via heal/pytest_failures.py                │
 │   ─ captures failure_class (timeout, disabled, intercepted,    │

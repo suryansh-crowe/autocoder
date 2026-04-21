@@ -45,7 +45,7 @@ import pytest
 from playwright.sync_api import Page, expect
 from pytest_bdd import given, parsers, scenarios, then, when
 
-from tests.pages.{module_name} import {class_name}
+from tests.generated.generated_{run_stamp}.{slug}.{module_name} import {class_name}
 
 scenarios("{feature_path}")
 
@@ -389,6 +389,7 @@ def render_steps(
     pom_plan: POMPlan,
     pom_module: str,
     elements: list[Element] | None = None,
+    run_stamp: str,
 ) -> str:
     """Emit a step-definitions module covering every step in the plan.
 
@@ -403,9 +404,12 @@ def render_steps(
     method_to_element = {m.name: m.element_id for m in pom_plan.methods if m.element_id}
     el_list: list[Element] = list(elements or [])
 
+    slug = pom_module.removesuffix("_page") or pom_module
     parts: list[str] = [
         _HEADER.format(
             feature_title=feature_title,
+            slug=slug,
+            run_stamp=run_stamp,
             module_name=pom_module,
             class_name=class_name,
             feature_path=feature_path,

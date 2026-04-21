@@ -182,14 +182,24 @@ def _load_extraction_inventory(settings: Settings, slug: str) -> dict:
 
 
 def _run_pytest_for_slugs(settings: Settings, slugs: list[str]) -> None:
-    runs_dir = settings.paths.manifest_dir / "runs"
-    runs_dir.mkdir(parents=True, exist_ok=True)
+    from autocoder.config import latest_bundle_for
+
     for slug in slugs:
-        test_file = settings.paths.steps_dir / f"test_{slug}.py"
+        bundle = latest_bundle_for(settings, slug)
+        if bundle is not None:
+            test_file = bundle / f"test_{slug}.py"
+            junit_path = bundle / "results.xml"
+        else:
+            # Legacy flat layout fallback.
+            test_file = settings.paths.steps_dir / f"test_{slug}.py"
+            bundle = test_file.parent
+            junit_dir = settings.paths.manifest_dir / "runs"
+            junit_dir.mkdir(parents=True, exist_ok=True)
+            junit_path = junit_dir / f"{slug}.xml"
         if not test_file.exists():
             logger.warn("report_pytest_skipped_missing", slug=slug, path=str(test_file))
             continue
-        junit_path = runs_dir / f"{slug}.xml"
+        bundle.mkdir(parents=True, exist_ok=True)
         logger.info(
             "report_pytest_run",
             slug=slug,
@@ -205,11 +215,18 @@ def _run_pytest_for_slugs(settings: Settings, slugs: list[str]) -> None:
 def build_report(settings: Settings, *, run_pytest: bool) -> ReportData:
     """Produce the consolidated report data.
 
-    When ``run_pytest`` is true, pytest is executed for every slug that
-    has a ``tests/steps/test_<slug>.py`` file, producing fresh JUnit
-    XML under ``manifest/runs/``. When false, existing JUnit files are
-    used (scenarios without a JUnit record are marked *unknown*).
+    When ``run_pytest`` is true, pytest is executed for every slug
+    whose newest bundle has a ``test_<slug>.py`` file, producing a
+    fresh ``tests/generated/<run>/<slug>/results.xml`` in place. When
+    false, existing JUnit files are used (scenarios without a JUnit
+    record are marked *unknown*).
+
+    Rescopes ``settings`` so registry / extractions read from the
+    newest run folder's ``manifest/``.
     """
+    from autocoder.config import scope_settings_to_latest_run
+
+    settings = scope_settings_to_latest_run(settings)
     ensure_dirs(settings)
     store = RegistryStore(settings.paths.registry_path)
     registry = store.load()
@@ -221,8 +238,12 @@ def build_report(settings: Settings, *, run_pytest: bool) -> ReportData:
         if node.slug:
             slug_to_url[node.slug] = node.url
     if not slug_to_url:
-        for p in settings.paths.steps_dir.glob("test_*.py"):
+        # Prefer the new per-run-folder bundle layout; fall back to legacy flat.
+        for p in settings.paths.generated_dir.glob("generated_*/*/test_*.py"):
             slug_to_url[p.stem.removeprefix("test_")] = ""
+        if not slug_to_url:
+            for p in settings.paths.steps_dir.glob("test_*.py"):
+                slug_to_url[p.stem.removeprefix("test_")] = ""
     slug_list = sorted(slug_to_url.keys())
 
     if run_pytest:
@@ -232,9 +253,18 @@ def build_report(settings: Settings, *, run_pytest: bool) -> ReportData:
     total_pass = total_fail = total_unknown = 0
     for slug in slug_list:
         url = slug_to_url.get(slug, "")
-        feature_path = settings.paths.features_dir / f"{slug}.feature"
-        steps_path = settings.paths.steps_dir / f"test_{slug}.py"
-        junit_path = settings.paths.manifest_dir / "runs" / f"{slug}.xml"
+        from autocoder.config import latest_bundle_for
+
+        bundle = latest_bundle_for(settings, slug)
+        if bundle is not None:
+            feature_path = bundle / f"{slug}.feature"
+            steps_path = bundle / f"test_{slug}.py"
+            junit_path = bundle / "results.xml"
+        else:
+            # Legacy flat layout fallback.
+            feature_path = settings.paths.features_dir / f"{slug}.feature"
+            steps_path = settings.paths.steps_dir / f"test_{slug}.py"
+            junit_path = settings.paths.manifest_dir / "runs" / f"{slug}.xml"
 
         scenarios_raw = _parse_feature_file(feature_path)
         results = _parse_junit(junit_path)

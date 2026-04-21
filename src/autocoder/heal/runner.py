@@ -28,6 +28,22 @@ from autocoder.heal.prompts import (
 )
 from autocoder.heal.pytest_failures import PytestFailure, run_pytest_capture
 from autocoder.heal.scanner import StubInfo, find_stubs_in_dir, find_stubs_in_file
+
+
+def _slugs_with_bundles(settings: Settings) -> list[str]:
+    """Return the set of slugs that have at least one bundle under
+    ``tests/generated/generated_*/<slug>/``.
+    """
+    from autocoder.config import RUN_FOLDER_PREFIX
+
+    seen: set[str] = set()
+    for run_folder in settings.paths.generated_dir.glob(f"{RUN_FOLDER_PREFIX}*"):
+        if not run_folder.is_dir():
+            continue
+        for child in run_folder.iterdir():
+            if child.is_dir() and (child / f"{child.name}.feature").exists():
+                seen.add(child.name)
+    return sorted(seen)
 from autocoder.heal.validator import validate_body
 from autocoder.llm.factory import get_llm_client
 from autocoder.llm.ollama_client import OllamaClient
@@ -182,7 +198,14 @@ def _compute_forbidden_ids(
     ``expect(catalog_page.locate('open_stewie_assistant')).to_be_visible()``
     after the scenario already clicked it).
     """
-    feature_path = settings.paths.features_dir / f"{stub.slug}.feature"
+    from autocoder.config import latest_bundle_for
+
+    latest = latest_bundle_for(settings, stub.slug)
+    if latest is not None:
+        feature_path = latest / f"{stub.slug}.feature"
+    else:
+        # Legacy flat layout fallback.
+        feature_path = settings.paths.features_dir / f"{stub.slug}.feature"
     prior_texts = _scenario_prior_step_texts(feature_path, stub.step_text)
     if not prior_texts:
         return []
@@ -292,9 +315,17 @@ def heal_steps(settings: Settings, opts: HealOptions) -> list[HealResult]:
     supplied) the runner first runs pytest, then heals only the
     step functions that actually failed at runtime — even if their
     body is no longer a stub.
+
+    Rescopes ``settings`` so registry / extractions / plans / heals
+    / logs all read+write against the newest run folder's
+    ``manifest/``. Healing modifies the latest run in place — the
+    run folder remains self-contained after heal completes.
     """
+    from autocoder.config import scope_settings_to_latest_run
+
+    settings = scope_settings_to_latest_run(settings)
     ensure_dirs(settings)
-    logger.init(settings.paths.logs_dir, level=settings.log_level)
+    logger.init(settings.paths.logs_dir, level=settings.log_level, force_reopen=True)
     started = time.monotonic()
 
     failures: list[PytestFailure] = []
@@ -304,7 +335,26 @@ def heal_steps(settings: Settings, opts: HealOptions) -> list[HealResult]:
     if failures:
         return _heal_failures(settings, opts, failures, started)
 
-    stubs = find_stubs_in_dir(settings.paths.steps_dir, slug=opts.slug)
+    from autocoder.config import latest_bundle_for
+    from autocoder.heal.scanner import find_stubs_in_file
+
+    stubs: list = []
+    # Heal only the latest bundle per slug — older run folders are
+    # kept for history, not for continued mutation.
+    slugs_to_scan = (
+        [opts.slug] if opts.slug else _slugs_with_bundles(settings)
+    )
+    for s in slugs_to_scan:
+        bundle = latest_bundle_for(settings, s)
+        if bundle is None:
+            continue
+        test_file = bundle / f"test_{s}.py"
+        if test_file.exists():
+            stubs.extend(find_stubs_in_file(test_file))
+    if not stubs:
+        # Fallback to the legacy flat layout so mixed workspaces still
+        # heal during the migration window.
+        stubs = find_stubs_in_dir(settings.paths.steps_dir, slug=opts.slug)
     logger.stage(
         "heal_start",
         stubs=len(stubs),
@@ -620,9 +670,27 @@ def _gather_failures(settings: Settings, opts: HealOptions) -> list[PytestFailur
 
     junit_path = settings.paths.manifest_dir / "heals" / "last-pytest.xml"
     junit_path.parent.mkdir(parents=True, exist_ok=True)
-    targets = opts.pytest_paths or [
-        settings.paths.steps_dir if not opts.slug else settings.paths.steps_dir / f"test_{opts.slug}.py"
-    ]
+    from autocoder.config import latest_bundle_for
+
+    if opts.pytest_paths:
+        targets = list(opts.pytest_paths)
+    elif opts.slug:
+        bundle = latest_bundle_for(settings, opts.slug)
+        if bundle is not None:
+            targets = [bundle / f"test_{opts.slug}.py"]
+        else:
+            targets = [settings.paths.steps_dir / f"test_{opts.slug}.py"]
+    else:
+        # Target the latest bundle for every slug so pytest only runs
+        # the current copy — historical run folders are not retested.
+        latest_targets = [
+            latest_bundle_for(settings, s) for s in _slugs_with_bundles(settings)
+        ]
+        targets = [
+            b / f"test_{b.name}.py" for b in latest_targets if b is not None
+        ]
+        if not targets:
+            targets = [settings.paths.generated_dir]
     logger.info(
         "heal_pytest_run",
         targets=",".join(str(p) for p in targets),

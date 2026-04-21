@@ -139,7 +139,7 @@ two planning calls. Everything else is deterministic Python.
   dark-themed dashboard with per-URL UI component chips, per-
   scenario pass/fail, and overall totals. `--run` invokes pytest
   first. The dashboard is also regenerated automatically at the end
-  of every `pytest tests/steps` session via the conftest
+  of every `pytest tests/generated` session via the conftest
   `pytest_sessionfinish` hook (opt out with
   `AUTOCODER_AUTOREPORT=false`).
 - Tracking and resume via `manifest/registry.yaml`. Per-URL

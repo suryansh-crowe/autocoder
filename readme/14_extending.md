@@ -126,7 +126,7 @@ lever downstream.
 The current renderer emits one step → one POM method. A higher-level
 "flow" (e.g. `complete_login_flow`) is straightforward: write a method
 on the relevant POM and reference it from a step in
-`tests/features/<slug>.feature`. The step generator will see the
+`tests/generated/<run>/<slug>/<slug>.feature`. The step generator will see the
 method via the validator's POM method list and wire it up.
 
 For a fully reusable flow catalog (login as a flow that any feature

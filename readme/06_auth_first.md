@@ -288,7 +288,7 @@ In the per-URL loop (`orchestrator.py:195`), any URL whose `kind ==
 LOGIN` and whose `url == registry.auth.login_url` is short-circuited
 to `status=COMPLETE` with reason `login_url_covered_by_auth_setup`.
 This is intentional: the auth-setup test already exercises the full
-login flow, so a duplicate `tests/features/login.feature` would be
+login flow, so a duplicate `tests/generated/<run>/login/login.feature` would be
 redundant and would race for the same storage_state file.
 
 Consequence: if you want Gherkin scenarios that assert *login-page*

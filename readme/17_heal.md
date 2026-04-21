@@ -27,7 +27,9 @@ autocoder heal --junit-xml report.xml # heal from an existing JUnit report
 
 ## What it does
 
-1. **Scans** `tests/steps/test_*.py` for the renderer's exact stub
+1. **Scans** each slug's newest bundle
+   (`tests/generated/generated_*/<slug>/test_<slug>.py`, resolved via
+   `latest_bundle_for`) for the renderer's exact stub
    shape (1-statement body whose only statement is
    `raise NotImplementedError("Implement step: …")`). Hand-edited
    bodies and multi-statement bodies are **left alone**.
@@ -93,13 +95,13 @@ model to use it only when nothing fits.
 autocoder generate
 
 # run the suite once — see which stubs failed
-pytest tests/steps/test_login.py
+pytest tests/generated/generated_*/login/test_login.py
 
 # heal the stubs (one LLM call per stub, ~200s each on Phi-4 CPU)
 autocoder heal --slug login
 
 # rerun
-pytest tests/steps/test_login.py
+pytest tests/generated/generated_*/login/test_login.py
 ```
 
 If the model's heal still doesn't match what your app expects, edit
@@ -224,7 +226,7 @@ fallbacks as `heal_applied body=pass …`.
 
 | Flag | Meaning |
 |------|---------|
-| `--slug <name>` | Restrict to `tests/steps/test_<slug>.py` only. |
+| `--slug <name>` | Restrict to the newest bundle for the given slug (`tests/generated/generated_*/<slug>/test_<slug>.py`). |
 | `--dry-run` | Show suggestions in the result table; do not write any file. |
 | `--force` | Bypass the on-disk cache; re-call the LLM for every target. |
 | `--from-pytest` | Run pytest first and heal whatever failed. |

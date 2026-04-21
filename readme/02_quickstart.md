@@ -173,10 +173,20 @@ Other flags are identical. Healing after the fact is available via
 
 Output:
 
-- `tests/pages/<slug>_page.py` — generated POMs
-- `tests/features/<slug>.feature` — Gherkin
-- `tests/steps/test_<slug>.py` — pytest-bdd step modules
+Every `autocoder generate` invocation drops a run folder under
+`tests/generated/` named `generated_<YYYYMMDD_HHMMSS>/`. Each URL
+becomes a self-contained bundle inside that folder:
+
+- `tests/generated/<run>/<slug>/<slug>_page.py` — generated POM
+- `tests/generated/<run>/<slug>/<slug>.feature` — Gherkin
+- `tests/generated/<run>/<slug>/test_<slug>.py` — pytest-bdd step module
+- `tests/generated/<run>/<slug>/results.xml` — JUnit xml (written on `autocoder report --run` / heal runs)
 - `tests/auth_setup/test_auth_setup.py` — rendered whenever auth is in scope; the renderer picks a template for the detected `auth_kind` (form / sso / username-first / email-only)
+
+`<run>` is shorthand for `generated_<timestamp>`. Historical run
+folders are kept as an audit trail — `tests/generated/conftest.py`
+filters pytest collection to the newest bundle per slug so older
+folders never re-execute.
 - `.auth/user.json` — Playwright storage state. For `form` and
   `sso_microsoft` flows, `autocoder generate` performs the login
   in-process and writes this file automatically. For flows that
@@ -213,7 +223,7 @@ authenticated session, so you can skip straight to running the
 generated tests:
 
 ```bash
-pytest tests/steps/test_login.py --headed     # watch in a browser first
+pytest tests/generated/generated_*/login/test_login.py --headed     # watch in a browser first
 pytest -m smoke                                # smoke tier
 pytest                                         # everything
 ```
@@ -237,7 +247,7 @@ reuse `.auth/user.json` until the session expires.
 
 ```bash
 autocoder heal --from-pytest --slug login
-pytest tests/steps/test_login.py
+pytest tests/generated/generated_*/login/test_login.py
 ```
 
 `--from-pytest` runs pytest, captures every failure with its
