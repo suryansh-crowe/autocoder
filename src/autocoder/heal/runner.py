@@ -57,6 +57,7 @@ class HealOptions:
     from_pytest: bool = False        # run pytest, heal failing steps
     pytest_paths: list[Path] = field(default_factory=list)
     junit_path: Path | None = None   # use an existing JUnit XML
+    file_paths: list[Path] = field(default_factory=list)  # explicit files to scan (overrides bundle lookup)
 
 
 @dataclass
@@ -339,22 +340,31 @@ def heal_steps(settings: Settings, opts: HealOptions) -> list[HealResult]:
     from autocoder.heal.scanner import find_stubs_in_file
 
     stubs: list = []
-    # Heal only the latest bundle per slug — older run folders are
-    # kept for history, not for continued mutation.
-    slugs_to_scan = (
-        [opts.slug] if opts.slug else _slugs_with_bundles(settings)
-    )
-    for s in slugs_to_scan:
-        bundle = latest_bundle_for(settings, s)
-        if bundle is None:
-            continue
-        test_file = bundle / f"test_{s}.py"
-        if test_file.exists():
-            stubs.extend(find_stubs_in_file(test_file))
-    if not stubs:
-        # Fallback to the legacy flat layout so mixed workspaces still
-        # heal during the migration window.
-        stubs = find_stubs_in_dir(settings.paths.steps_dir, slug=opts.slug)
+    if opts.file_paths:
+        # Explicit-file mode: scan only what the caller asked for.
+        # Slug context (POM plan, extraction) is still derived from the
+        # file stem, so the target file must be named test_<slug>.py
+        # and the slug must exist in the manifest.
+        for p in opts.file_paths:
+            if p.exists():
+                stubs.extend(find_stubs_in_file(p))
+    else:
+        # Heal only the latest bundle per slug — older run folders are
+        # kept for history, not for continued mutation.
+        slugs_to_scan = (
+            [opts.slug] if opts.slug else _slugs_with_bundles(settings)
+        )
+        for s in slugs_to_scan:
+            bundle = latest_bundle_for(settings, s)
+            if bundle is None:
+                continue
+            test_file = bundle / f"test_{s}.py"
+            if test_file.exists():
+                stubs.extend(find_stubs_in_file(test_file))
+        if not stubs:
+            # Fallback to the legacy flat layout so mixed workspaces still
+            # heal during the migration window.
+            stubs = find_stubs_in_dir(settings.paths.steps_dir, slug=opts.slug)
     logger.stage(
         "heal_start",
         stubs=len(stubs),
