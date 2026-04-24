@@ -46,7 +46,7 @@ def _slugs_with_bundles(settings: Settings) -> list[str]:
     return sorted(seen)
 from autocoder.heal.validator import validate_body
 from autocoder.llm.factory import get_llm_client
-from autocoder.llm.ollama_client import OllamaClient
+from autocoder.llm.protocols import LLMClient
 
 
 @dataclass
@@ -377,15 +377,12 @@ def heal_steps(settings: Settings, opts: HealOptions) -> list[HealResult]:
         return []
 
     client = get_llm_client(settings)
-    if not client.is_available():
+    if not client.availability_for(["heal:preflight"]):
         logger.die(
             "llm_unreachable",
-            backend="azure_openai" if settings.use_azure_openai else "ollama",
-            hint=(
-                "Verify the Azure endpoint/deployment/api-key."
-                if settings.use_azure_openai
-                else "Start the container; see readme/09_llm.md."
-            ),
+            backend="mcp",
+            endpoint=settings.llm_endpoint(),
+            hint=settings.llm_hint(),
         )
 
     results: list[HealResult] = []
@@ -440,7 +437,7 @@ def heal_steps(settings: Settings, opts: HealOptions) -> list[HealResult]:
 def _heal_one(
     *,
     settings: Settings,
-    client: OllamaClient,
+    client: LLMClient,
     stub: StubInfo,
     pom_methods: list[dict],
     pom_method_names: set[str],
@@ -849,15 +846,12 @@ def _heal_failures(
         return []
 
     client = get_llm_client(settings)
-    if not client.is_available():
+    if not client.availability_for(["heal_fail:preflight"]):
         logger.die(
             "llm_unreachable",
-            backend="azure_openai" if settings.use_azure_openai else "ollama",
-            hint=(
-                "Verify the Azure endpoint/deployment/api-key."
-                if settings.use_azure_openai
-                else "Start the container; see readme/09_llm.md."
-            ),
+            backend="mcp",
+            endpoint=settings.llm_endpoint(),
+            hint=settings.llm_hint(),
         )
 
     results: list[HealResult] = []
@@ -918,7 +912,7 @@ def _heal_failures(
 def _heal_one_failure(
     *,
     settings: Settings,
-    client: OllamaClient,
+    client: LLMClient,
     stub: StubInfo,
     failure: PytestFailure,
     pom_methods: list[dict],

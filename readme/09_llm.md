@@ -228,23 +228,20 @@ docker rm -f  autocoder-phi4        # drop the container (volume kept)
 docker volume rm autocoder-ollama-models   # nuke the cached model (~9 GB)
 ```
 
-## Backend selection
+## MCP-routed LLM flow
 
-The project supports two LLM backends through a single factory at
-`autocoder/llm/factory.py:get_llm_client(settings)`. Both backends
-expose the same `chat_json(system, user, purpose=..., retries=1)`
-signature and both route errors through `OllamaError`, so every
-downstream call site works with either one.
+Autocoder no longer chooses between Ollama and Azure OpenAI itself.
+`autocoder/llm/factory.py:get_llm_client(settings)` always returns the
+MCP-backed client, and the sibling MCP server decides which concrete
+provider should handle each request.
 
-| Backend       | Switch                             | When to use                                                                                              |
-|---------------|------------------------------------|----------------------------------------------------------------------------------------------------------|
-| Ollama local  | `USE_AZURE_OPENAI=false` (default) | Offline / air-gapped development. Slow on CPU but free and private.                                      |
-| Azure OpenAI  | `USE_AZURE_OPENAI=true`            | When iteration speed matters. Phi-4 CPU inference is ~2-4 tok/s; Azure `gpt-4.1` responds in ~1-3s total.|
+Autocoder still keeps the provider configuration in its own `.env`
+because the MCP server loads that file through
+`autocoder.config.load_settings(project_root=MCP_AUTOCODER_ROOT)`.
 
-`.env` keys for the Azure backend:
+`.env` keys for the Azure provider:
 
 ```env
-USE_AZURE_OPENAI=true
 OPENAI_ENDPOINT=https://<your-resource>.openai.azure.com
 OPENAI_API_KEY=<your-data-plane-key>            # or AZURE_OPENAI_API_KEY
 OPENAI_API_VERSION=2024-12-01-preview
@@ -255,11 +252,113 @@ AZURE_CHAT_MAX_TOKENS=2048
 AZURE_CHAT_TIMEOUT_SECONDS=120
 ```
 
-The orchestrator logs `llm_backend_selected backend=... endpoint=...`
-once at startup so runs are auditable. The key value is never logged;
-only the **name** of the env var that holds it is persisted to the
-registry / log stream, matching the existing secret-handling rule for
-`LOGIN_PASSWORD`.
+`.env` keys for the local Ollama provider:
+
+```env
+OLLAMA_ENDPOINT=http://localhost:11434
+OLLAMA_MODEL=phi4:14b
+OLLAMA_TIMEOUT_SECONDS=1800
+OLLAMA_NUM_CTX=4096
+OLLAMA_TEMPERATURE=0.2
+OLLAMA_TOP_P=0.9
+OLLAMA_NUM_PREDICT=2048
+```
+
+Client-side MCP connection settings in autocoder:
+
+```env
+AUTOCODER_MCP_TRANSPORT=streamable-http
+AUTOCODER_MCP_HTTP_HOST=127.0.0.1
+AUTOCODER_MCP_HTTP_PORT=8000
+AUTOCODER_MCP_HTTP_PATH=/mcp
+```
+
+The orchestrator logs `llm_backend_selected backend=mcp endpoint=...`
+once at startup so runs stay auditable. Provider secrets are still
+never logged; only presence is exposed through the existing secret-safe
+settings helpers.
+
+When autocoder needs an LLM response, it does **not** call Ollama or
+Azure OpenAI directly. Instead it calls the sibling MCP server, and the
+MCP server scores the available backends from request metadata such as
+workload type, JSON strictness, prompt size, token budget, privacy
+preference, and cost preference.
+
+```text
+autocoder planner / heal flow
+  -> get_llm_client(settings)
+  -> MCPClient
+  -> MCP tool: llm_ping        (preflight)
+  -> MCP tool: llm_chat        (actual request)
+  -> MCP server metadata-based scoring
+  -> OllamaClient or AzureOpenAIClient
+  -> model response
+  -> MCP response back to autocoder
+  -> autocoder JSON recovery / validation / cache
+```
+
+Actual call chain:
+
+1. The orchestrator or heal runner asks `factory.py` for the active
+   client.
+2. The factory returns `autocoder/llm/mcp_client.py:MCPClient`.
+3. Startup preflight calls the MCP `llm_ping` tool instead of
+   checking `/api/tags` or Azure directly.
+4. Real planner / heal calls go through MCP `llm_chat` with:
+   `system`, `user`, `purpose`, `json_mode`, `max_tokens`, and routing
+   metadata inferred from the request.
+5. The MCP server tool (`../mcp/src/mcp_server/tools/llm.py`) inspects
+   that metadata and ranks the configured backends:
+   - planner work with strict JSON and bigger prompts tends to score
+     Azure higher
+   - short/private/low-cost heal work tends to score Ollama higher
+   - if the first pick fails and `MCP_LLM_ENABLE_FAILOVER=true`, the
+     server retries once on the next-ranked backend
+6. The MCP server loads autocoder's provider config from the sibling
+   checkout, instantiates the chosen direct client, and performs the
+   real model call there.
+7. The MCP server returns structured metadata:
+   selected backend, selected model, text, token counts, duration, and
+   whether failover was used.
+8. Back in autocoder, `MCPClient` logs the `llm_call` event and the
+   existing JSON retry / parse / validate flow continues unchanged.
+
+Simple selection examples:
+
+1. A planning request such as `pom_plan:catalog_page` goes to MCP with
+   metadata like:
+   - workload = `pom_plan`
+   - strict_json = `true`
+   - prompt_chars = `9500`
+   - prefer_speed = `4`
+   - prefer_intelligence = `5`
+   - prefer_json_reliability = `5`
+2. The MCP server scores both configured backends.
+   - Azure usually wins here because planning is a larger prompt and
+     strict JSON matters a lot.
+   - Ollama usually scores lower because privacy/cost are not the main
+     priority for this request.
+3. A heal request such as `heal:catalog_page:_i_click_submit` goes to
+   MCP with metadata like:
+   - workload = `heal`
+   - strict_json = `true`
+   - prompt_chars = `1800`
+   - prefer_privacy = `4`
+   - prefer_low_cost = `4`
+4. Ollama often wins that request because the task is shorter and the
+   privacy/cost signals are stronger.
+5. If the chosen backend fails, the MCP server can retry once on the
+   next-ranked backend when `MCP_LLM_ENABLE_FAILOVER=true`.
+
+Tiny mental model:
+
+- big planning task -> Azure/OpenAI is usually ranked higher
+- small private/local heal task -> Ollama is usually ranked higher
+- chosen backend fails -> MCP tries the second-best option
+
+This is **tool-based MCP routing**, not MCP sampling. The backend
+decision stays on your MCP server, which is why the model/provider
+credentials remain server-side instead of moving back into the client.
 
 ## Client
 

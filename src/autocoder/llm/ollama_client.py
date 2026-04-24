@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,6 +70,10 @@ class OllamaClient:
         except Exception as exc:  # noqa: BLE001
             logger.warn("ollama_tags_unreachable", endpoint=self._s.endpoint, err=str(exc))
             return False
+
+    def availability_for(self, purposes: Iterable[str]) -> bool:
+        del purposes
+        return self.is_available()
 
     def chat(
         self,

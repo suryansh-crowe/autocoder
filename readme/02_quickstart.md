@@ -17,8 +17,9 @@ playwright install chromium
 
 ## 2. Start Phi-4 in Docker (loopback-only)
 
-Only needed when `USE_AZURE_OPENAI=false` (the Ollama backend).
-Skip this step if you're using Azure OpenAI (step 3).
+Optional, but recommended when you want the MCP server to have a local
+LLM available for private or low-cost work. If you only want Azure
+OpenAI behind MCP, you can skip this step.
 
 The repo ships a Dockerfile + compose file under `docker/ollama/`
 that builds an image with `phi4:14b` **baked in at build time** —

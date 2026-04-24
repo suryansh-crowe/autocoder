@@ -296,22 +296,15 @@ def run_generate(settings: Settings, opts: GenerateOptions) -> list[StageResult]
 
         if not opts.skip_llm:
             client = get_llm_client(settings)
-            backend = "azure_openai" if settings.use_azure_openai else "ollama"
-            endpoint = (
-                settings.azure_openai.endpoint
-                if settings.use_azure_openai
-                else settings.ollama.endpoint
-            )
+            backend = "mcp"
+            endpoint = settings.llm_endpoint()
             logger.info("llm_check", backend=backend, endpoint=endpoint)
-            if not client.is_available():
+            if not client.availability_for(["pom_plan:preflight", "feature_plan:preflight"]):
                 logger.die(
                     "llm_unreachable",
                     backend=backend,
                     endpoint=endpoint,
-                    hint=(
-                        "Verify the Azure endpoint/deployment/api-key." if settings.use_azure_openai
-                        else "Start the container; see readme/09_llm.md."
-                    ),
+                    hint=settings.llm_hint(),
                 )
             logger.ok("llm_ready", backend=backend, endpoint=endpoint)
         else:

@@ -17,7 +17,8 @@ import json
 from pathlib import Path
 
 from autocoder import logger
-from autocoder.llm.ollama_client import OllamaClient, OllamaError
+from autocoder.llm.ollama_client import OllamaError
+from autocoder.llm.protocols import LLMClient
 from autocoder.llm.prompts import (
     FEATURE_SYSTEM,
     POM_SYSTEM,
@@ -93,7 +94,7 @@ def generate_pom_plan(
     *,
     page_class: str,
     fixture_name: str,
-    client: OllamaClient,
+    client: LLMClient,
     cache_dir: Path,
     force: bool = False,
 ) -> POMPlan:
@@ -146,7 +147,7 @@ def generate_feature_plan(
     *,
     pom_plan: POMPlan,
     requested_tiers: list[str],
-    client: OllamaClient,
+    client: LLMClient,
     cache_dir: Path,
     force: bool = False,
 ) -> FeaturePlan:

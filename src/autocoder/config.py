@@ -14,6 +14,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+MCP_TRANSPORTS = ("stdio", "http", "streamable-http", "sse")
+
+
 def _flag(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -41,6 +44,14 @@ def _float(name: str, default: float) -> float:
         return default
 
 
+def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    return value if value in allowed else default
+
+
 @dataclass(frozen=True)
 class OllamaSettings:
     endpoint: str
@@ -56,8 +67,7 @@ class OllamaSettings:
 class AzureOpenAISettings:
     """Config for the Azure OpenAI hosted backend.
 
-    Activated by setting ``USE_AZURE_OPENAI=true`` in ``.env``. Every
-    field has an environment override; defaults produce Azure's
+    Every field has an environment override; defaults produce Azure's
     current GA chat completions shape.
 
     Only the **name** of the env var that holds the API key is stored
@@ -73,6 +83,27 @@ class AzureOpenAISettings:
     top_p: float
     max_tokens: int
     timeout_seconds: int
+
+
+@dataclass(frozen=True)
+class MCPSettings:
+    server_name: str
+    transport: str
+    http_host: str
+    http_port: int
+    http_path: str
+    timeout_seconds: int
+    command: str
+    cwd: str
+    llm_chat_tool: str
+    llm_ping_tool: str
+
+    @property
+    def url(self) -> str:
+        path = self.http_path or "/mcp"
+        if not path.startswith("/"):
+            path = "/" + path
+        return f"http://{self.http_host}:{self.http_port}{path}"
 
 
 @dataclass(frozen=True)
@@ -113,16 +144,9 @@ class Settings:
     base_url: str
     login_url: str | None
     log_level: str
-    # LLM backend selection.
-    #
-    # ``use_azure_openai=True`` routes every planner call (POM plan,
-    # feature plan, stub heal, failure heal) to the Azure OpenAI
-    # deployment in ``azure_openai``. The Ollama deployment in
-    # ``ollama`` is still read so you can flip the switch back in
-    # ``.env`` without editing code.
-    use_azure_openai: bool
     ollama: OllamaSettings
     azure_openai: AzureOpenAISettings
+    mcp: MCPSettings
     browser: BrowserSettings
     extraction: ExtractionSettings
     paths: Paths
@@ -144,6 +168,20 @@ class Settings:
         We never log the value itself, only whether it is present.
         """
         return bool(os.environ.get(key, "").strip())
+
+    def llm_endpoint(self) -> str:
+        return self.mcp.url if self.mcp.transport != "stdio" else self.mcp.command
+
+    def llm_hint(self) -> str:
+        if self.mcp.transport == "stdio":
+            return (
+                "Start or install the MCP server command and verify the "
+                f"`{self.mcp.llm_chat_tool}` tool is exposed."
+            )
+        return (
+            "Start the MCP server over HTTP and verify the "
+            f"`{self.mcp.llm_ping_tool}` tool at {self.mcp.url}."
+        )
 
 
 def load_settings(project_root: Path | None = None) -> Settings:
@@ -184,12 +222,10 @@ def load_settings(project_root: Path | None = None) -> Settings:
         if os.environ.get("AZURE_OPENAI_API_KEY", "").strip()
         else "OPENAI_API_KEY"
     )
-
     return Settings(
         base_url=os.environ.get("BASE_URL", "").rstrip("/"),
         login_url=os.environ.get("LOGIN_URL") or None,
         log_level=os.environ.get("LOG_LEVEL", "info").strip().lower() or "info",
-        use_azure_openai=_flag("USE_AZURE_OPENAI", False),
         ollama=OllamaSettings(
             endpoint=os.environ.get("OLLAMA_ENDPOINT", "http://localhost:11434").rstrip("/"),
             model=os.environ.get("OLLAMA_MODEL", "phi4:14b"),
@@ -211,6 +247,18 @@ def load_settings(project_root: Path | None = None) -> Settings:
             top_p=_float("AZURE_CHAT_TOP_P", 0.9),
             max_tokens=_int("AZURE_CHAT_MAX_TOKENS", 2048),
             timeout_seconds=_int("AZURE_CHAT_TIMEOUT_SECONDS", 120),
+        ),
+        mcp=MCPSettings(
+            server_name=os.environ.get("AUTOCODER_MCP_SERVER_NAME", "mcp-server").strip() or "mcp-server",
+            transport=_choice("AUTOCODER_MCP_TRANSPORT", "streamable-http", MCP_TRANSPORTS),
+            http_host=os.environ.get("AUTOCODER_MCP_HTTP_HOST", "127.0.0.1").strip() or "127.0.0.1",
+            http_port=_int("AUTOCODER_MCP_HTTP_PORT", 8000),
+            http_path=os.environ.get("AUTOCODER_MCP_HTTP_PATH", "/mcp").strip() or "/mcp",
+            timeout_seconds=_int("AUTOCODER_MCP_TIMEOUT_SECONDS", 1800),
+            command=os.environ.get("AUTOCODER_MCP_COMMAND", "mcp-server").strip() or "mcp-server",
+            cwd=os.environ.get("AUTOCODER_MCP_CWD", "").strip(),
+            llm_chat_tool=os.environ.get("AUTOCODER_MCP_LLM_CHAT_TOOL", "llm_chat").strip() or "llm_chat",
+            llm_ping_tool=os.environ.get("AUTOCODER_MCP_LLM_PING_TOOL", "llm_ping").strip() or "llm_ping",
         ),
         browser=BrowserSettings(
             headless=_flag("HEADLESS", True),

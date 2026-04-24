@@ -66,12 +66,12 @@ docker run -d --name autocoder-phi4 --restart unless-stopped \
   autocoder-phi4:latest
 ```
 
-## Wire the autocoder CLI to it
+## Wire autocoder + MCP to it
 
-Your `.env` should set the backend to Ollama and point at localhost:
+Keep the Ollama provider settings in autocoder's `.env` so the sibling
+MCP server can load them when it decides a request should run locally:
 
 ```env
-USE_AZURE_OPENAI=false
 OLLAMA_ENDPOINT=http://localhost:11434
 OLLAMA_MODEL=phi4:14b
 ```

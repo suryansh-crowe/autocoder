@@ -1,8 +1,8 @@
 """Azure OpenAI chat-completions client.
 
 Interface-compatible with :class:`autocoder.llm.ollama_client.OllamaClient`
-so the orchestrator and heal runner can swap backends at runtime via
-``Settings.use_azure_openai``. Specifically, this class exposes the
+so the MCP server can call the hosted backend through the same
+application-facing contract. Specifically, this class exposes the
 same three public methods the rest of the codebase relies on:
 
 * ``is_available() -> bool``
@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Iterable
 from typing import Any
 
 import httpx
@@ -124,6 +125,10 @@ class AzureOpenAIClient:
                 body=r.text[:200],
             )
         return ok
+
+    def availability_for(self, purposes: Iterable[str]) -> bool:
+        del purposes
+        return self.is_available()
 
     def chat(
         self,

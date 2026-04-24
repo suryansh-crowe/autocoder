@@ -49,8 +49,9 @@ autocoder/                        Project root (= the "autocoder" project)
 
       llm/                        Stages 4 + 6: single LLM call per stage
         ollama_client.py            HTTP client tuned for CPU-only Phi-4
-        azure_client.py             Azure OpenAI client (drop-in replacement)
-        factory.py                  Picks backend from USE_AZURE_OPENAI
+        azure_client.py             Azure OpenAI client used by the sibling MCP server
+        factory.py                  Always returns the MCP transport client
+        mcp_client.py               MCP bridge that sends request metadata to the server
         prompts.py                  Compact prompts + build_ui_inventory() — categorises
                                     page components (search/chat/nav/forms/data/
                                     pagination/buttons/choices) for the feature plan
