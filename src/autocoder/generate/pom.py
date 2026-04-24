@@ -14,6 +14,8 @@ already-validated plan + extraction.
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from autocoder.models import (
     Element,
     PageExtraction,
@@ -35,6 +37,7 @@ from __future__ import annotations
 
 from playwright.sync_api import Page, expect
 
+from tests import settings
 from tests.pages.base_page import BasePage
 from tests.support.locator_strategy import SelectorSpec
 '''
@@ -43,11 +46,31 @@ from tests.support.locator_strategy import SelectorSpec
 _CLASS_TPL = '''
 
 class {class_name}(BasePage):
-    URL = "{url}"
+    # Path component only — the absolute URL is built at runtime from
+    # ``settings.BASE_URL`` so the same POM targets dev / staging / prod
+    # without regeneration. The extraction URL captured at generation
+    # time was: {url}
+    PATH = "{path}"
     SELECTORS: dict[str, list[SelectorSpec]] = {selectors_dict}
 
     def __init__(self, page: Page) -> None:
         super().__init__(page, self.SELECTORS)
+
+    @property
+    def URL(self) -> str:
+        """Absolute URL for this page, joined against ``settings.BASE_URL``.
+
+        Raises if ``BASE_URL`` is empty so a missing ``.env`` entry
+        fails loudly instead of silently hitting ``about:blank`` or
+        whatever Playwright does with a bare path.
+        """
+        base = (settings.BASE_URL or "").rstrip("/")
+        if not base:
+            raise RuntimeError(
+                "BASE_URL is not set in .env — add it so tests target "
+                "your environment (dev / staging / prod)."
+            )
+        return base + self.PATH
 
     def navigate(self) -> None:
         # ``domcontentloaded`` matches the extraction-time wait ladder
@@ -55,6 +78,21 @@ class {class_name}(BasePage):
         # requests prevent the ``load`` event from firing inside 30s.
         self.page.goto(self.URL, wait_until="domcontentloaded")
 '''
+
+
+def _url_to_path(url: str) -> str:
+    """Return the path+query+fragment portion of ``url``, defaulting to ``/``.
+
+    Used so the generated POM stores only the env-agnostic path; the
+    host comes from ``settings.BASE_URL`` at runtime.
+    """
+    parsed = urlparse(url)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    if parsed.fragment:
+        path = f"{path}#{parsed.fragment}"
+    return path
 
 
 _METHOD_TPL = '''
@@ -122,6 +160,13 @@ def _build_method_body(method, element: Element | None) -> str:
     if action == "expect_text":
         arg = method.args[0] if method.args else "value"
         return f"expect({locator}).to_contain_text({arg})"
+    if action == "press_enter":
+        # Keyboard-submit path for search/chat/form inputs whose
+        # submission is Enter-triggered (no adjacent submit button).
+        # Raw ``locator.press`` — the consent-checkbox heal path in
+        # BasePage only wraps click/check/fill/select; press has no
+        # equivalent failure mode that benefits from the heal loop.
+        return f"{locator}.press('Enter')"
     return "pass"
 
 
@@ -140,6 +185,7 @@ def render_pom(plan: POMPlan, extraction: PageExtraction) -> str:
         _CLASS_TPL.format(
             class_name=plan.class_name,
             url=extraction.final_url,
+            path=_url_to_path(extraction.final_url),
             selectors_dict=selectors_dict,
         )
     )

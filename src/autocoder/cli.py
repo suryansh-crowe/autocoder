@@ -511,6 +511,12 @@ def report(
             "passed": data.total_passed,
             "failed": data.total_failed,
             "unknown": data.total_unknown,
+            "failure_category_totals": {
+                "frontend": data.total_frontend,
+                "script": data.total_script,
+                "environment": data.total_environment,
+                "other": data.total_other_fail,
+            },
             "slugs": [
                 {
                     "slug": s.slug,
@@ -525,6 +531,8 @@ def report(
                             "tiers": sc.tiers,
                             "passed": sc.passed,
                             "error": sc.error,
+                            "failure_class": sc.failure_class,
+                            "category": sc.category,
                         }
                         for sc in s.scenarios
                     ],
@@ -741,6 +749,16 @@ def _print_report(data: ReportData) -> None:
     if data.total_scenarios:
         pct = 100.0 * data.total_passed / data.total_scenarios
         summary.add_row("Pass rate", f"{pct:.1f}%")
+    if data.total_failed:
+        summary.add_row(
+            "[magenta]Frontend[/] / [cyan]Script[/] / [yellow]Env[/] / Other",
+            (
+                f"[magenta]{data.total_frontend}[/] / "
+                f"[cyan]{data.total_script}[/] / "
+                f"[yellow]{data.total_environment}[/] / "
+                f"{data.total_other_fail}"
+            ),
+        )
     _console.print(summary)
 
 

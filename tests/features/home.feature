@@ -1,32 +1,82 @@
-Feature: Stewie AI Home Page Core Interactions
-  Covers search, chat, navigation, and action button flows with consequence assertions.
+Feature: Stewie AI Home: Search, Chat, Navigation, and Action Consequences
+  Validates search and chat submission, navigation to known pages, and action button consequences with concrete outcome assertions.
 
   Background:
-    Given User is on the Stewie AI home page
+    Given The user is on the Stewie AI Home page
 
   @smoke
-  Scenario: User searches for assets with a real query
-    When User enters a valid asset search query
-    And User submits the asset search
-    Then The My Domain Health section is updated with search results
+  Scenario: Submitting asset search for 'DQ-AGT-001' displays matching result row
+    When The user enters 'DQ-AGT-001' in the asset search box
+    And The user submits the asset search
+    Then The results area contains 'DQ-AGT-001'
 
   @regression @validation
-  Scenario: User submits asset search with empty query
-    When User submits the asset search with no input
-    Then A validation message is displayed for the search box
+  Scenario: Submitting asset search for unknown id shows no results message
+    When The user enters 'unknown_id_42' in the asset search box
+    And The user submits the asset search
+    Then The results area displays 'No matching assets'
+
+  @regression @validation
+  Scenario: Submitting empty asset search keeps the result count unchanged
+    When The user clears the asset search box
+    And The user submits the asset search
+    Then The results area shows the same number of rows as before
 
   @smoke
-  Scenario: User interacts with Ask Stewie chat
-    When User types a question in the Ask Stewie chat box
-    And User clicks the Ask button
-    Then The Ask Stewie chat panel displays the response
+  Scenario: Submitting chat prompt 'Show asset rules for DQ-AGT-001' displays Stewie response
+    When The user enters 'Show asset rules for DQ-AGT-001' in the Ask Stewie chat box
+    And The user submits the chat prompt
+    Then The chat response area displays a message containing 'DQ-AGT-001'
+
+  @regression @validation
+  Scenario: Submitting empty chat prompt shows validation error
+    When The user clears the Ask Stewie chat box
+    And The user submits the chat prompt
+    Then A validation error message appears in the chat area
+
+  @regression @navigation
+  Scenario: Clicking Data Catalog navigates to Catalog page and displays Catalog landmark
+    When The user clicks the Data Catalog button
+    Then The URL contains '/catalog'
+    And The Catalog page landmark is visible
+
+  @regression @navigation
+  Scenario: Clicking Ask Stewie navigates to Stewie page and displays Stewie Terminal heading
+    When The user clicks the Ask Stewie button
+    Then The URL contains '/stewie'
+    And The 'Stewie Terminal' heading is displayed
+
+  @regression @navigation
+  Scenario: Clicking Source Connection navigates to Source Connection page and displays relevant heading
+    When The user clicks the Source Connection button
+    Then The Source Connection page landmark is visible
+
+  @regression @navigation
+  Scenario: Clicking Data Quality navigates to Data Quality page and displays relevant heading
+    When The user clicks the Data Quality button
+    Then The Data Quality page landmark is visible
+
+  @regression @navigation
+  Scenario: Clicking Agent Pipelines navigates to Agent Pipelines page and displays relevant heading
+    When The user clicks the Agent Pipelines button
+    Then The Agent Pipelines page landmark is visible
+
+  @regression @navigation
+  Scenario: Clicking Agent Management navigates to Agent Management page and displays relevant heading
+    When The user clicks the Agent Management button
+    Then The Agent Management page landmark is visible
+
+  @regression @navigation
+  Scenario: Clicking Security navigates to Security page and displays relevant heading
+    When The user clicks the Security button
+    Then The Security page landmark is visible
+
+  @regression @navigation
+  Scenario: Clicking Notifications navigates to Notifications page and displays relevant heading
+    When The user clicks the Notifications button
+    Then The Notifications page landmark is visible
 
   @smoke
-  Scenario: User navigates using the sidebar
-    When User clicks the Data Catalog navigation button
-    Then The Stewie Terminal heading is visible
-
-  @smoke
-  Scenario: User triggers Admin Actions via action button
-    When User clicks the Data Quality action button
-    Then The Admin Actions section is displayed
+  Scenario: Clicking Close sidebar collapses the sidebar and enables main content
+    When The user clicks the Close sidebar button
+    Then The main content area becomes fully enabled

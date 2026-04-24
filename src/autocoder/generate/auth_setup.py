@@ -17,8 +17,9 @@ Two variants exist:
   branding or MFA may need manual tweaks.
 
 The renderer never embeds secrets in the file. It only emits
-``os.environ.get(...)`` lookups with helpful error messages when they
-are absent.
+``tests.settings.get_required(...)`` lookups — which funnel through
+the single ``.env`` loader in ``tests/settings.py`` — so the generated
+test never touches ``os.environ`` directly.
 """
 
 from __future__ import annotations
@@ -26,32 +27,86 @@ from __future__ import annotations
 from autocoder.models import AuthSpec, SelectorStrategy, StableSelector
 
 
+_SESSION_STORAGE_HELPERS = '''
+_SESSION_STORAGE_COMPANION = _STORAGE_STATE.with_name(
+    _STORAGE_STATE.stem + ".session_storage" + _STORAGE_STATE.suffix
+)
+
+
+def _dump_session_storage(page: Page) -> None:
+    """Snapshot window.sessionStorage next to storage_state.
+
+    Playwright's storage_state() only captures cookies + localStorage.
+    MSAL.js (and most SPA auth libs) put the authenticated account in
+    sessionStorage, so without this snapshot the next browser context
+    would show an unauthenticated shell even with cookies present.
+    """
+    import json as _json
+
+    try:
+        raw = page.evaluate(
+            "() => {{"
+            "  const out = {{}};"
+            "  for (let i = 0; i < window.sessionStorage.length; i++) {{"
+            "    const k = window.sessionStorage.key(i);"
+            "    out[k] = window.sessionStorage.getItem(k);"
+            "  }}"
+            "  return out;"
+            "}}"
+        )
+    except Exception:
+        return
+    if not isinstance(raw, dict):
+        return
+    _SESSION_STORAGE_COMPANION.parent.mkdir(parents=True, exist_ok=True)
+    _SESSION_STORAGE_COMPANION.write_text(
+        _json.dumps(raw, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _wait_for_msal_hydration(page: Page, timeout_ms: int = 20_000) -> None:
+    """Block until sessionStorage has something in it.
+
+    After an SSO popup closes, MSAL needs a tick to process the token
+    response and write the authenticated account into sessionStorage on
+    the main tab. Capturing storage_state before that lands gives a
+    useless snapshot; this wait ensures the snapshot has teeth.
+    """
+    try:
+        page.wait_for_function(
+            "() => window.sessionStorage && window.sessionStorage.length > 0",
+            timeout=timeout_ms,
+        )
+    except Exception:
+        # MSAL-less apps simply never populate sessionStorage; that's
+        # fine — their auth rides on cookies alone.
+        return
+'''
+
+
 _TEMPLATE_FORM = '''"""Generated auth setup (form flow). Captures storage_state to {storage_state_display}."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 from playwright.sync_api import Page, expect
 
+from tests import settings
+
 
 _STORAGE_STATE = Path({storage_state_path!r})
-_LOGIN_URL = {login_url!r}
-
-
-def _need(env: str) -> str:
-    val = os.environ.get(env, "").strip()
-    if not val:
-        raise RuntimeError(f"Missing required env var: {{env}}. Add it to .env (never commit it).")
-    return val
-
+# Login URL is sourced from ``.env`` via ``settings.LOGIN_URL`` so the
+# same test can run against dev / staging / prod without regeneration.
+# The URL captured at generation time was: {login_url}
+_LOGIN_URL = settings.LOGIN_URL or {login_url!r}
+''' + _SESSION_STORAGE_HELPERS + '''
 
 @pytest.mark.auth_setup
 def test_auth_setup(page: Page) -> None:
-    username = _need("{username_env}")
-    password = _need("{password_env}")
+    username = settings.get_required("{username_env}")
+    password = settings.get_required("{password_env}")
 
     page.goto(_LOGIN_URL)
     {username_locator}.fill(username)
@@ -60,8 +115,11 @@ def test_auth_setup(page: Page) -> None:
 
     {wait_block}
 
+    _wait_for_msal_hydration(page)
+
     _STORAGE_STATE.parent.mkdir(parents=True, exist_ok=True)
     page.context.storage_state(path=str(_STORAGE_STATE))
+    _dump_session_storage(page)
 '''
 
 
@@ -69,28 +127,25 @@ _TEMPLATE_USERNAME_FIRST = '''"""Generated auth setup (username-first flow). Cap
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 from playwright.sync_api import Page, TimeoutError as PWTimeout, expect
 
+from tests import settings
+
 
 _STORAGE_STATE = Path({storage_state_path!r})
-_LOGIN_URL = {login_url!r}
-
-
-def _need(env: str) -> str:
-    val = os.environ.get(env, "").strip()
-    if not val:
-        raise RuntimeError(f"Missing required env var: {{env}}. Add it to .env (never commit it).")
-    return val
-
+# Login URL is sourced from ``.env`` via ``settings.LOGIN_URL`` so the
+# same test can run against dev / staging / prod without regeneration.
+# The URL captured at generation time was: {login_url}
+_LOGIN_URL = settings.LOGIN_URL or {login_url!r}
+''' + _SESSION_STORAGE_HELPERS + '''
 
 @pytest.mark.auth_setup
 def test_auth_setup(page: Page) -> None:
-    username = _need("{username_env}")
-    password = os.environ.get("{password_env}", "").strip()  # optional
+    username = settings.get_required("{username_env}")
+    password = settings.get_optional("{password_env}")  # optional on this flow
 
     page.goto(_LOGIN_URL)
     {username_locator}.fill(username)
@@ -120,8 +175,11 @@ def test_auth_setup(page: Page) -> None:
 
     {wait_block}
 
+    _wait_for_msal_hydration(page)
+
     _STORAGE_STATE.parent.mkdir(parents=True, exist_ok=True)
     page.context.storage_state(path=str(_STORAGE_STATE))
+    _dump_session_storage(page)
 '''
 
 
@@ -136,27 +194,24 @@ login route.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 from playwright.sync_api import Page, expect
 
+from tests import settings
+
 
 _STORAGE_STATE = Path({storage_state_path!r})
-_LOGIN_URL = {login_url!r}
-
-
-def _need(env: str) -> str:
-    val = os.environ.get(env, "").strip()
-    if not val:
-        raise RuntimeError(f"Missing required env var: {{env}}. Add it to .env (never commit it).")
-    return val
-
+# Login URL is sourced from ``.env`` via ``settings.LOGIN_URL`` so the
+# same test can run against dev / staging / prod without regeneration.
+# The URL captured at generation time was: {login_url}
+_LOGIN_URL = settings.LOGIN_URL or {login_url!r}
+''' + _SESSION_STORAGE_HELPERS + '''
 
 @pytest.mark.auth_setup
 def test_auth_setup(page: Page) -> None:
-    username = _need("{username_env}")
+    username = settings.get_required("{username_env}")
 
     page.goto(_LOGIN_URL)
     {username_locator}.fill(username)
@@ -172,8 +227,11 @@ def test_auth_setup(page: Page) -> None:
 
     {wait_block}
 
+    _wait_for_msal_hydration(page)
+
     _STORAGE_STATE.parent.mkdir(parents=True, exist_ok=True)
     page.context.storage_state(path=str(_STORAGE_STATE))
+    _dump_session_storage(page)
 '''
 
 
@@ -181,24 +239,21 @@ _TEMPLATE_SSO_MS = '''"""Generated auth setup (Microsoft SSO flow). Captures sto
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 from playwright.sync_api import Page, expect
 
+from tests import settings
+
 
 _STORAGE_STATE = Path({storage_state_path!r})
-_LOGIN_URL = {login_url!r}
+# Login URL is sourced from ``.env`` via ``settings.LOGIN_URL`` so the
+# same test can run against dev / staging / prod without regeneration.
+# The URL captured at generation time was: {login_url}
+_LOGIN_URL = settings.LOGIN_URL or {login_url!r}
 _ENTRA_HOST = "login.microsoftonline.com"
-
-
-def _need(env: str) -> str:
-    val = os.environ.get(env, "").strip()
-    if not val:
-        raise RuntimeError(f"Missing required env var: {{env}}. Add it to .env (never commit it).")
-    return val
-
+''' + _SESSION_STORAGE_HELPERS + '''
 
 def _click_kmsi(page: Page) -> None:
     """Best-effort click through the 'Stay signed in?' prompt."""
@@ -214,8 +269,8 @@ def _click_kmsi(page: Page) -> None:
 
 @pytest.mark.auth_setup
 def test_auth_setup(page: Page, context) -> None:
-    username = _need("{username_env}")
-    password = _need("{password_env}")
+    username = settings.get_required("{username_env}")
+    password = settings.get_required("{password_env}")
 
     page.goto(_LOGIN_URL)
 
@@ -247,10 +302,23 @@ def test_auth_setup(page: Page, context) -> None:
 
     _click_kmsi(active)
 
+    # If Entra was driven in a popup, bring focus back to the main tab.
+    # The main page is where MSAL writes the account into sessionStorage
+    # and is the origin whose cookies we need to persist.
+    try:
+        page.bring_to_front()
+    except Exception:
+        pass
+
     {wait_block}
+
+    # Give the main-tab MSAL client a beat to process the token response
+    # and hydrate sessionStorage before we snapshot it.
+    _wait_for_msal_hydration(page)
 
     _STORAGE_STATE.parent.mkdir(parents=True, exist_ok=True)
     page.context.storage_state(path=str(_STORAGE_STATE))
+    _dump_session_storage(page)
 '''
 
 

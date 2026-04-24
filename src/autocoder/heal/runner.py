@@ -109,6 +109,10 @@ def _load_extraction(settings: Settings, slug: str) -> tuple[list[dict], str, st
         item: dict = {"id": e.get("id", ""), "kind": e.get("kind", "")}
         if e.get("name"):
             item["name"] = e["name"]
+        # Preserve ``visible`` so failure-heal can compute
+        # ``preload_visible_ids`` without re-reading the extraction —
+        # default True to stay safe when older dumps lack the field.
+        item["visible"] = bool(e.get("visible", True))
         elements.append(item)
     return elements, data.get("final_url") or data.get("url", ""), data.get("fingerprint", "")
 

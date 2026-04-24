@@ -27,6 +27,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlparse
 
 from autocoder import logger
 from autocoder.config import Settings, ensure_dirs
@@ -49,7 +50,11 @@ from autocoder.intake.classifier import classify_urls, looks_like_login_url
 from autocoder.intake.graph import build_dependency_graph, topological_order
 from autocoder.llm.factory import get_llm_client
 from autocoder.llm.ollama_client import OllamaClient
-from autocoder.llm.plans import generate_feature_plan, generate_pom_plan
+from autocoder.llm.plans import (
+    generate_feature_plan,
+    generate_pom_plan,
+    generate_steps_plan,
+)
 from autocoder.registry.diff import diff_extractions
 from autocoder.registry.store import RegistryStore, fingerprint_extraction
 from autocoder.models import (
@@ -64,6 +69,38 @@ from autocoder.utils import page_class_name
 
 
 DEFAULT_TIERS = ["smoke", "happy", "validation"]
+
+
+def _known_pages(registry: Registry, current_slug: str) -> list[dict]:
+    """Compact snapshot of sibling pages for the cross-page prompts.
+
+    The feature-plan and steps-plan prompts consume this so scenarios
+    that reference "Catalog" / "Home" / "Sources" (links on the
+    current page) can be bound to the SIBLING page's POM navigate
+    method or a URL-based assertion rather than fuzzy-matched against
+    the current page's elements.
+
+    Only nodes that already have a generated POM on disk are
+    surfaced — a sibling whose extraction hasn't happened yet (still
+    ``pending``) is not yet known to be a real page in this session.
+    """
+    pages: list[dict] = []
+    for n in registry.nodes.values():
+        if n.slug == current_slug:
+            continue
+        if not n.pom_path:
+            continue
+        class_name = page_class_name(n.slug)
+        pages.append(
+            {
+                "slug": n.slug,
+                "url": n.url,
+                "pom_class": class_name,
+                "fixture": f"{n.slug}_page",
+                "navigate_method": "navigate",
+            }
+        )
+    return pages
 
 
 @dataclass
@@ -82,6 +119,14 @@ class StageResult:
     feature_path: Path | None
     steps_path: Path | None
     issues: list[str]
+    # Populated when extraction returned a deferrable failure the
+    # orchestrator should retry after the main URL loop has warmed
+    # the session. Today the only value set here is ``"redirected_away"``,
+    # which lets the run_generate driver collect URLs the SPA's
+    # guard redirected away from and re-run them once every sibling
+    # has been processed (so MSAL + sessionStorage are fully
+    # hydrated). ``None`` means no deferred action is needed.
+    deferred_kind: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +258,78 @@ def run_generate(settings: Settings, opts: GenerateOptions) -> list[StageResult]
         else:
             logger.warn("llm_skipped_by_flag", flag="--skip-llm")
 
+        # Session warm-up — navigate once to an authenticated URL so
+        # MSAL (or any auth middleware that triggers silent token
+        # refreshes) can complete its handshake before we start
+        # extracting protected pages. Without this, the first
+        # per-URL extraction races the SPA's token refresh: we issue
+        # ``page.goto('/catalog')``, the SPA intercepts with a
+        # redirect to ``/`` or ``/login``, and we scrape the wrong
+        # page's DOM. With the warm-up, MSAL resolves once here and
+        # every subsequent per-URL goto lands cleanly.
+        #
+        # The base_url is a poor warm-up target on many apps because
+        # ``/`` is itself auth-gated and can loop (``/`` → ``/login``
+        # → ``/`` on some SPAs). Instead, iterate through the URL
+        # queue trying each as a warm-up target until one settles
+        # with interactive content. First success wins; remaining
+        # URLs go through the normal per-URL loop.
+        if shared is not None and ordered:
+            warmup_ok = False
+            for _candidate in ordered:
+                if _candidate.kind == URLKind.LOGIN:
+                    continue
+                logger.info(
+                    "session_warmup_try",
+                    url=logger.safe_url(_candidate.url),
+                )
+                try:
+                    shared.page.goto(
+                        _candidate.url,
+                        wait_until="domcontentloaded",
+                        timeout=settings.browser.extraction_nav_timeout_ms,
+                    )
+                    try:
+                        shared.page.wait_for_selector(
+                            'button, a[href], input, textarea, select, '
+                            '[role="button"], [role="link"], [role="textbox"]',
+                            state="attached",
+                            timeout=30_000,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        shared.page.wait_for_load_state(
+                            "networkidle", timeout=15_000
+                        )
+                    except Exception:
+                        pass
+                    # Tail sleep for any late-firing MSAL refresh that
+                    # networkidle misses.
+                    time.sleep(3.0)
+                    logger.ok(
+                        "session_warmup_done",
+                        via=logger.safe_url(_candidate.url),
+                        final_url=logger.safe_url(shared.page.url),
+                    )
+                    warmup_ok = True
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    logger.info(
+                        "session_warmup_try_failed",
+                        url=logger.safe_url(_candidate.url),
+                        err=str(exc)[:120],
+                    )
+                    continue
+            if not warmup_ok:
+                logger.warn(
+                    "session_warmup_all_failed",
+                    hint=(
+                        "no candidate URL settled; per-URL extractions "
+                        "may still work but MSAL may redirect mid-scrape"
+                    ),
+                )
+
         try:
             for idx, node in enumerate(ordered, start=1):
                 logger.stage(
@@ -272,6 +389,93 @@ def run_generate(settings: Settings, opts: GenerateOptions) -> list[StageResult]
                     steps=bool(result.steps_path),
                     issues=len(result.issues),
                 )
+
+            # Deferred-retry pass — URLs whose first direct-navigation
+            # pass got redirected away (SPA guard bounced us to /login
+            # or /) get one more attempt now that every sibling has
+            # been processed. By this point MSAL has fully hydrated
+            # sessionStorage from the siblings' loads, so a second
+            # direct goto often lands on the requested URL cleanly.
+            #
+            # We filter on ``r.pom_path`` (this run's result) rather
+            # than ``r.node.pom_path`` (persistent in registry.yaml
+            # from earlier runs). A URL whose previous run succeeded
+            # has a ``node.pom_path`` set in the registry even if the
+            # file on disk has been deleted — using that as the
+            # filter would skip legitimate retry candidates.
+            deferred_results = [
+                r for r in results
+                if r.deferred_kind == "redirected_away"
+                and r.pom_path is None
+            ]
+            if deferred_results and shared is not None:
+                logger.stage(
+                    "deferred_retry",
+                    count=len(deferred_results),
+                    hint=(
+                        "retrying URLs that were redirected away on the "
+                        "first pass; session is now fully hydrated from "
+                        "successfully-processed siblings"
+                    ),
+                )
+                for deferred in deferred_results:
+                    node = deferred.node
+                    logger.info(
+                        "url_retry_begin",
+                        slug=node.slug,
+                        url=logger.safe_url(node.url),
+                    )
+                    try:
+                        retry_result = _process_url(
+                            node, registry, settings, store, client, opts,
+                            shared=shared,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        node.status = Status.FAILED
+                        store.upsert_node(registry, node)
+                        store.save(registry)
+                        logger.error(
+                            "url_retry_failed",
+                            slug=node.slug,
+                            err=str(exc),
+                            err_type=type(exc).__name__,
+                        )
+                        continue
+                    # If retry still returned a redirected_away failure,
+                    # this URL genuinely cannot be reached via direct
+                    # navigation in this environment. Mark FAILED so the
+                    # summary table reflects reality.
+                    if retry_result.deferred_kind == "redirected_away":
+                        node.status = Status.FAILED
+                        logger.warn(
+                            "url_retry_still_redirected",
+                            slug=node.slug,
+                            hint=(
+                                "URL redirected away on both passes. "
+                                "Likely a role/permission gap or a "
+                                "route that is only reachable via "
+                                "in-app navigation from a sibling page. "
+                                "Consider click-through extraction as "
+                                "a future fix."
+                            ),
+                        )
+                    # Replace the original deferred result with the retry
+                    # outcome so the summary reflects the final state.
+                    try:
+                        idx_in_results = results.index(deferred)
+                        results[idx_in_results] = retry_result
+                    except ValueError:
+                        results.append(retry_result)
+                    store.upsert_node(registry, retry_result.node)
+                    store.save(registry)
+                    logger.ok(
+                        "url_retry_done",
+                        slug=node.slug,
+                        status=retry_result.node.status.value,
+                        pom=bool(retry_result.pom_path),
+                        feature=bool(retry_result.feature_path),
+                        steps=bool(retry_result.steps_path),
+                    )
         finally:
             if client is not None:
                 client.close()
@@ -1042,9 +1246,35 @@ def _process_url(
             node, registry, settings, store, failure, use_storage, shared=shared
         )
     if extraction is None:
-        node.status = Status.FAILED
-        logger.error("url_failed", slug=node.slug, stage="extract")
-        return StageResult(node=node, extraction=None, pom_path=None, feature_path=None, steps_path=None, issues=["extraction failed"])
+        # ``redirected_away`` is a soft failure: the SPA's guard bounced
+        # us to a different URL on the first attempt, but once sibling
+        # URLs are processed the session may be warm enough for a
+        # second direct-navigation pass to succeed. Don't mark FAILED
+        # yet — leave status unchanged and signal the driver to retry.
+        deferred_kind: str | None = None
+        if failure is not None and failure.get("kind") == "redirected_away":
+            deferred_kind = "redirected_away"
+            logger.info(
+                "url_deferred_for_retry",
+                slug=node.slug,
+                reason="redirected_away",
+                hint=(
+                    "will retry direct navigation after every other URL "
+                    "is processed and the session is fully hydrated"
+                ),
+            )
+        else:
+            node.status = Status.FAILED
+            logger.error("url_failed", slug=node.slug, stage="extract")
+        return StageResult(
+            node=node,
+            extraction=None,
+            pom_path=None,
+            feature_path=None,
+            steps_path=None,
+            issues=["extraction failed"],
+            deferred_kind=deferred_kind,
+        )
 
     extraction.fingerprint = fingerprint_extraction(extraction)
     extraction_path = settings.paths.extractions_dir / f"{node.slug}.json"
@@ -1152,7 +1382,7 @@ def _process_url(
     page_class = page_class_name(node.slug)
     fixture_name = node.slug + "_page"
 
-    logger.stage("pom_plan", slug=node.slug, fixture=fixture_name, elements=len(extraction.elements))
+    logger.stage("prompt1_pom_plan", slug=node.slug, fixture=fixture_name, elements=len(extraction.elements))
     pom_plan = generate_pom_plan(
         extraction,
         page_class=page_class,
@@ -1174,11 +1404,21 @@ def _process_url(
         methods=len(pom_plan.methods),
     )
 
+    known_pages = _known_pages(registry, node.slug)
+    if known_pages:
+        logger.info(
+            "known_pages_context",
+            slug=node.slug,
+            count=len(known_pages),
+            siblings=",".join(p["slug"] for p in known_pages),
+        )
+
     logger.stage(
-        "feature_plan",
+        "prompt2_feature_plan",
         slug=node.slug,
         tiers=",".join(opts.tiers),
         pom_methods=len(pom_plan.methods),
+        known_pages=len(known_pages),
     )
     feature_plan = generate_feature_plan(
         extraction,
@@ -1187,6 +1427,7 @@ def _process_url(
         client=client,
         cache_dir=settings.paths.plans_dir,
         force=opts.force,
+        known_pages=known_pages,
     )
     feature_path = settings.paths.features_dir / f"{node.slug}.feature"
     existed = feature_path.exists()
@@ -1202,6 +1443,36 @@ def _process_url(
         background_steps=len(feature_plan.background),
     )
 
+    # Prompt 3 — ONE LLM call that produces a Playwright body for every
+    # unique Gherkin step in the plan. The step renderer below prefers
+    # these bodies (after validation) before falling back to
+    # heuristic synthesis. Heal is still responsible for correcting
+    # statements that fail at runtime.
+    logger.stage(
+        "prompt3_steps_plan",
+        slug=node.slug,
+        scenarios=len(feature_plan.scenarios),
+        known_pages=len(known_pages),
+    )
+    try:
+        steps_plan = generate_steps_plan(
+            extraction,
+            feature_plan=feature_plan,
+            pom_plan=pom_plan,
+            client=client,
+            cache_dir=settings.paths.plans_dir,
+            force=opts.force,
+            known_pages=known_pages,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warn(
+            "steps_plan_skipped",
+            slug=node.slug,
+            err=str(exc),
+            hint="continuing with deterministic renderer + heal fallback",
+        )
+        steps_plan = None
+
     steps_path = settings.paths.steps_dir / f"test_{node.slug}.py"
     rel_feature = feature_path.relative_to(settings.paths.features_dir)
     existed = steps_path.exists()
@@ -1212,6 +1483,8 @@ def _process_url(
         pom_plan=pom_plan,
         pom_module=f"{node.slug}_page",
         elements=list(extraction.elements),
+        steps_plan=steps_plan,
+        known_pages=known_pages,
     )
     steps_path.write_text(rendered_steps, encoding="utf-8")
     node.steps_path = str(steps_path)
@@ -1679,40 +1952,46 @@ def _extract_detailed(
                     "err": "redirected_to_login",
                 }
 
-            # Settle wait: many authenticated SPAs only commit the HTML
+            # Settle wait: authenticated SPAs only commit the HTML
             # shell inside the nav-timeout budget and rely on XHR +
-            # client-side rendering for the real DOM. If ``commit`` was
-            # the only wait tier that succeeded, the page is almost
-            # certainly still hydrating. Give it a bounded additional
-            # window to produce at least one interactive element before
-            # we enumerate. Without this, ``extract_page`` runs against
-            # an empty shell and downstream stages hallucinate.
-            if "domcontentloaded" not in diag.wait_strategy:
-                try:
-                    sess.page.wait_for_selector(
-                        'button, a[href], input, textarea, select, '
-                        '[role="button"], [role="link"], [role="textbox"]',
-                        state="attached",
-                        timeout=15_000,
-                    )
-                    logger.info(
-                        "extract_settle_succeeded",
-                        slug=node.slug,
-                        hint="at least one interactive element attached",
-                    )
-                except Exception:
-                    logger.warn(
-                        "extract_settle_timeout",
-                        slug=node.slug,
-                        url=logger.safe_url(node.url),
-                        hint=(
-                            "no interactive element attached within 15s after "
-                            "commit. The page may still be rendering, may be "
-                            "genuinely empty, or may be blocked by a network "
-                            "dependency. Extraction will still run but is "
-                            "likely to return 0 elements."
-                        ),
-                    )
+            # client-side rendering for the real DOM. ``domcontentloaded``
+            # firing only tells us raw HTML was parsed — React/Vue/Angular
+            # haven't mounted the component tree yet, so the DOM is still
+            # effectively empty at that point. Wait (unconditionally) for
+            # at least one interactive element to be attached before we
+            # enumerate. Without this, ``extract_page`` runs against an
+            # empty shell and downstream stages hallucinate.
+            #
+            # Budget is 30s (up from 15s) to cover slower tenants whose
+            # mount phase includes auth refresh + first-page data fetch.
+            # Returns early as soon as the FIRST interactive element
+            # appears — fast pages aren't penalised.
+            try:
+                sess.page.wait_for_selector(
+                    'button, a[href], input, textarea, select, '
+                    '[role="button"], [role="link"], [role="textbox"]',
+                    state="attached",
+                    timeout=30_000,
+                )
+                logger.info(
+                    "extract_settle_succeeded",
+                    slug=node.slug,
+                    hint="at least one interactive element attached",
+                )
+            except Exception:
+                logger.warn(
+                    "extract_settle_timeout",
+                    slug=node.slug,
+                    url=logger.safe_url(node.url),
+                    hint=(
+                        "no interactive element attached within 30s after "
+                        "commit. The page may still be rendering, may be "
+                        "genuinely empty, or may be blocked by a network "
+                        "dependency. Extraction will still run and — if "
+                        "it returns 0 elements — retry once with an "
+                        "extended wait before giving up."
+                    ),
+                )
 
             # Silent re-auth for MSAL-style SPAs. Many single-page apps
             # that use MSAL.js keep their authenticated account in
@@ -1761,13 +2040,288 @@ def _extract_detailed(
                         ),
                     )
 
-            extraction = extract_page(
-                sess.page,
-                url=node.url,
-                settings=settings,
-                requires_auth=node.requires_auth,
-                kind=node.kind,
-            )
+            # Path mismatch check — if the SPA's router silently
+            # redirected us away from the requested URL (common after
+            # a MSAL silent-reauth: first load hydrates sessionStorage,
+            # then the SPA routes to the default landing ``/`` instead
+            # of the requested ``/catalog``), re-navigate once now that
+            # the session is fully bound. Bounded to one retry and only
+            # fires when the landing is the bare root (``/``) so we
+            # don't fight intentional app redirects (e.g., ``/home``
+            # being the canonical post-auth landing for a ``/`` input).
+            from urllib.parse import urlparse as _urlparse
+            requested_path = _urlparse(node.url).path or "/"
+            current_path = _urlparse(sess.page.url).path or "/"
+            if requested_path not in ("", "/") and current_path in ("", "/"):
+                logger.info(
+                    "extract_renavigate_after_reauth",
+                    slug=node.slug,
+                    requested=requested_path,
+                    landed=current_path,
+                    hint="SPA redirected to root after silent-reauth; re-navigating to the requested URL now that the session is hydrated",
+                )
+                try:
+                    sess.page.goto(
+                        node.url,
+                        wait_until="domcontentloaded",
+                        timeout=settings.browser.extraction_nav_timeout_ms,
+                    )
+                    try:
+                        sess.page.wait_for_selector(
+                            'button, a[href], input, textarea, select, '
+                            '[role="button"], [role="link"], [role="textbox"]',
+                            state="attached",
+                            timeout=30_000,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        sess.page.wait_for_load_state(
+                            "networkidle", timeout=5_000
+                        )
+                    except Exception:
+                        pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.warn(
+                        "extract_renavigate_failed",
+                        slug=node.slug,
+                        err=str(exc),
+                    )
+
+            # Page-stability wait — the hard one. The settle-wait
+            # above returns as soon as the FIRST interactive element
+            # attaches; on SPAs that render a brief landing shell
+            # before routing to the target page, that first element
+            # is the shell's nav button. If we start scraping now,
+            # Playwright's DOM enumeration races the SPA's router:
+            # either the scrape catches the shell (low element
+            # count) or the page navigates mid-scrape and Playwright
+            # raises "Execution context was destroyed".
+            #
+            # To avoid both, poll ``page.url`` plus the interactive-
+            # element count every 500ms and only proceed once BOTH
+            # have stayed constant for ``STABILITY_WINDOW_S``. Any
+            # change restarts the clock. Bounded by
+            # ``STABILITY_MAX_S`` so we never hang here forever on a
+            # page that genuinely keeps mutating.
+            STABILITY_WINDOW_S = 3.0
+            STABILITY_MAX_S = 30.0
+            _stable_started = time.monotonic()
+            _last_url = sess.page.url
+            try:
+                _last_count = sess.page.evaluate(
+                    "() => document.querySelectorAll("
+                    "'button, a[href], input, textarea, select, "
+                    "[role=button], [role=link], [role=textbox]'"
+                    ").length"
+                )
+            except Exception:
+                _last_count = 0
+            _last_change_at = _stable_started
+            while True:
+                _now = time.monotonic()
+                if _now - _stable_started > STABILITY_MAX_S:
+                    logger.info(
+                        "extract_stability_budget_exhausted",
+                        slug=node.slug,
+                        hint=(
+                            "page never stopped mutating within 30s; "
+                            "proceeding to scrape anyway"
+                        ),
+                    )
+                    break
+                time.sleep(0.5)
+                try:
+                    _cur_url = sess.page.url
+                    _cur_count = sess.page.evaluate(
+                        "() => document.querySelectorAll("
+                        "'button, a[href], input, textarea, select, "
+                        "[role=button], [role=link], [role=textbox]'"
+                        ").length"
+                    )
+                except Exception:
+                    # Execution context destroyed mid-poll → the SPA
+                    # is actively navigating. Restart the stability
+                    # clock and keep polling.
+                    _last_change_at = _now
+                    continue
+                if _cur_url != _last_url or _cur_count != _last_count:
+                    _last_url = _cur_url
+                    _last_count = _cur_count
+                    _last_change_at = _now
+                    continue
+                if _now - _last_change_at >= STABILITY_WINDOW_S:
+                    logger.info(
+                        "extract_stability_reached",
+                        slug=node.slug,
+                        final_url=logger.safe_url(_cur_url),
+                        element_count=_cur_count,
+                        hint=(
+                            f"URL + element count stayed constant for "
+                            f"{STABILITY_WINDOW_S:.0f}s — safe to scrape"
+                        ),
+                    )
+                    break
+
+            # Execution-context-destroyed retry — the stability wait
+            # reduces but does not eliminate the race. If the scrape
+            # itself catches the SPA mid-navigation, wait for the new
+            # DOM to settle and re-scrape once.
+            extraction = None
+            for _scrape_attempt in range(2):
+                try:
+                    extraction = extract_page(
+                        sess.page,
+                        url=node.url,
+                        settings=settings,
+                        requires_auth=node.requires_auth,
+                        kind=node.kind,
+                    )
+                    break
+                except Exception as _scrape_exc:  # noqa: BLE001
+                    msg = str(_scrape_exc)
+                    if (
+                        "Execution context was destroyed" in msg
+                        and _scrape_attempt < 1
+                    ):
+                        logger.info(
+                            "extract_scrape_nav_retry",
+                            slug=node.slug,
+                            err=msg[:160],
+                            hint=(
+                                "SPA navigated during scrape; waiting for "
+                                "DOM to settle and re-scraping once"
+                            ),
+                        )
+                        try:
+                            sess.page.wait_for_load_state(
+                                "domcontentloaded", timeout=15_000
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            sess.page.wait_for_selector(
+                                'button, a[href], input, textarea, select, '
+                                '[role="button"], [role="link"], [role="textbox"]',
+                                state="attached",
+                                timeout=15_000,
+                            )
+                        except Exception:
+                            pass
+                        continue
+                    raise
+
+            # Retry gate: if the first scrape captured zero elements,
+            # the SPA almost certainly hasn't finished rendering yet
+            # (slow XHR on mount, deferred route-level code-split, or
+            # the initial auth refresh still in-flight). Give it a
+            # bounded extra window to materialise content, then
+            # re-scrape. We only move on to the next URL once either
+            # (a) the retry succeeds with >0 elements, or (b) the
+            # retry also comes back empty — at which point the page
+            # really is empty and there is nothing to wait for.
+            if len(extraction.elements) == 0:
+                logger.warn(
+                    "extract_empty_retry",
+                    slug=node.slug,
+                    url=logger.safe_url(node.url),
+                    final_url=logger.safe_url(extraction.final_url),
+                    wait_strategy=diag.wait_strategy,
+                    hint=(
+                        "first scrape returned 0 elements — waiting up "
+                        "to 25s for interactive content and re-scraping "
+                        "before moving to the next URL"
+                    ),
+                )
+                try:
+                    sess.page.wait_for_selector(
+                        'button, a[href], input, textarea, select, '
+                        '[role="button"], [role="link"], [role="textbox"]',
+                        state="visible",
+                        timeout=25_000,
+                    )
+                    # Small tail-wait for network idle so data-table
+                    # rows / pagination populated by XHR can land too.
+                    try:
+                        sess.page.wait_for_load_state(
+                            "networkidle", timeout=5_000
+                        )
+                    except Exception:
+                        pass
+                except Exception:
+                    # Selector timeout — page is genuinely empty or
+                    # still broken. Fall through to re-scrape anyway
+                    # so we emit a deterministic "empty extraction"
+                    # rather than a mysterious partial one.
+                    pass
+
+                extraction = extract_page(
+                    sess.page,
+                    url=node.url,
+                    settings=settings,
+                    requires_auth=node.requires_auth,
+                    kind=node.kind,
+                )
+                if len(extraction.elements) > 0:
+                    logger.ok(
+                        "extract_empty_retry_recovered",
+                        slug=node.slug,
+                        elements=len(extraction.elements),
+                    )
+                else:
+                    logger.warn(
+                        "extract_empty_retry_exhausted",
+                        slug=node.slug,
+                        url=logger.safe_url(node.url),
+                        final_url=logger.safe_url(extraction.final_url),
+                        hint=(
+                            "page produced no interactive elements in "
+                            "either pass. Likely auth rejected silently, "
+                            "the URL redirects to an empty landing, or "
+                            "the app requires an MFA step. Delete "
+                            ".auth/user.json and rerun to recapture."
+                        ),
+                    )
+
+            # URL-path-mismatch check — refuse to save the wrong page's
+            # DOM under this slug's file name. The SPA's auth guard may
+            # redirect ``/catalog`` to ``/`` or ``/home`` and hand us a
+            # DOM that LOOKS successful (11 nav buttons) but is not the
+            # page the user asked for. Without this check the renderer
+            # silently writes ``catalog_page.py`` with home's content.
+            # With it, we treat the redirect as a failure so the user
+            # sees a clear ``extract_redirected_away`` warning instead
+            # of mislabeled artifacts on disk.
+            _req_path = (urlparse(node.url).path or "/").rstrip("/") or "/"
+            _final_path = (
+                urlparse(extraction.final_url).path or "/"
+            ).rstrip("/") or "/"
+            if _req_path != _final_path and _req_path not in ("", "/"):
+                logger.warn(
+                    "extract_redirected_away",
+                    slug=node.slug,
+                    requested=_req_path,
+                    landed=_final_path,
+                    elements=len(extraction.elements),
+                    hint=(
+                        "the SPA redirected us away from the requested "
+                        "URL; the scrape captured the wrong page's DOM. "
+                        "Refusing to save this as the requested slug's "
+                        "POM. Likely causes: session warm-up did not "
+                        "hydrate MSAL, storage_state is stale, or the "
+                        "app requires an extra click-through from a "
+                        "sibling page. Fix the auth/session and retry."
+                    ),
+                )
+                return None, {
+                    "kind": "redirected_away",
+                    "final_url": extraction.final_url,
+                    "redirects": list(diag.redirects),
+                    "err": (
+                        f"requested {_req_path}, landed at {_final_path}"
+                    ),
+                }
+
             logger.ok(
                 "extract_done",
                 slug=node.slug,

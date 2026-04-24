@@ -114,3 +114,33 @@ safe — the orchestrator preserves it on re-render unless the
 extraction fingerprint actually changes the catalog. If you need a
 permanent override, lift the change into `autocoder/extract/selectors.py`
 so the next extraction emits it directly.
+
+## Diagnostic rewrapping of Playwright timeouts
+
+`tests/pages/base_page.py` wraps every action (`click`, `check`,
+`fill`, `select`) with a `_diagnose()` helper. When Playwright raises
+its generic `TimeoutError: Timeout 30000ms exceeded`, the wrapper
+probes the locator's current state (count / visible / enabled /
+bounding box) and re-raises an `AssertionError` that names **why**
+the action never landed:
+
+| Shape of failure | Re-raised message |
+|---|---|
+| 0 elements match | `[click 'sign_in'] NO MATCH — selector resolved to 0 elements …` |
+| >1 matches | `[click 'sign_in'] AMBIGUOUS — 3 elements match …` |
+| In DOM, hidden | `[click 'sign_in'] HIDDEN — in DOM but not visible …` |
+| Visible, disabled | `[click 'sign_in'] DISABLED — visible but not interactive …` |
+| No bounding box | `[click 'sign_in'] DETACHED — no bounding box …` |
+| Looks actionable but never resolves | `[click 'sign_in'] TIMEOUT — …` |
+
+The wording preserves the tokens
+(`element is not enabled`, `element is not visible`,
+`no selector resolved`, `element is not attached`) that
+`autocoder/heal/pytest_failures.classify()` reads, so the failure
+class (and the report's frontend / script / environment category)
+still routes correctly. The original `PWTimeout` is kept as
+`__cause__`, so `pytest -vv` still shows the raw Playwright trace.
+
+This single wrapper removes the most annoying class of "what went
+wrong?" moments — you no longer have to re-run with a debugger just
+to discover that the element you were clicking was disabled.

@@ -9,17 +9,26 @@ hand it.
 
 ```
 URL list  ──▶  classify  ──▶  auth-first  ──▶  extract  ──▶
-              POM plan  ──▶  POM render   ──▶  feature plan  ──▶
-              feature render  ──▶  steps render  ──▶  registry
+              prompt-1 (POM plan)   ──▶  POM render         ──▶
+              prompt-2 (feature plan) ──▶  feature render   ──▶
+              prompt-3 (steps plan)  ──▶  steps render      ──▶
+              (heal stubs)          ──▶  registry
 ```
 
-A single LLM model — **Phi-4 14B via Ollama**, CPU-only — drives the
-two planning calls. Everything else is deterministic Python.
+Three sequential LLM calls per URL, with the output of each one
+consumed by the next. The system prompts themselves live as JSON
+files under `src/autocoder/prompts/` so non-engineers can edit them.
+Two backends are supported:
+
+* **Phi-4 14B via Ollama**, CPU-only, local and free.
+* **Azure OpenAI** (default `gpt-4.1`), hosted, fast.
+
+Everything else in the pipeline is deterministic Python.
 
 ## What it is not
 
 - It is **not** an exhaustive test generator. The feature-plan
-  prompt caps scenarios at 2–6 per URL, 6 steps each, and up to 20
+  prompt caps scenarios at 3–8 per URL, 6 steps each, and up to 20
   POM methods. Default tiers are `smoke,happy,validation`. Add
   more via `--tier`, but the LLM still picks what fits those caps.
   See `10_generation.md` for the full coverage contract.
@@ -48,9 +57,10 @@ two planning calls. Everything else is deterministic Python.
    registry. If a run dies, the next run continues at the first
    incomplete stage for each URL.
 4. **No secrets near the LLM.** Credentials only live in the local
-   `.env`. Generated code reads them via `os.environ.get(...)`. The
-   LLM never sees them, and they are never written to logs, manifest,
-   or generated artifacts.
+   `.env`. Every test-side module reads them via a single loader at
+   `tests/settings.py` — no file under `tests/` touches `os.environ`
+   directly. The LLM never sees them, and they are never written to
+   logs, manifest, or generated artifacts.
 5. **Self-healing locators.** Every element is captured with a
    primary selector plus up to four fallbacks. The runtime resolver
    walks the chain, so a single brittle attribute does not break the
@@ -93,24 +103,39 @@ two planning calls. Everything else is deterministic Python.
 - Stable selector discovery with up to four fallbacks per element.
 - POM creation/update with selector dictionaries kept in one place.
 - BDD feature generation by tier (smoke / sanity / regression / etc).
-- Playwright step generation that calls POM methods, **synthesizes**
-  executable Playwright calls for common patterns (`navigate`, the
-  full `is/should be/must be [not] checked|visible|enabled|disabled`
-  family, negation no-ops), and falls back to `NotImplementedError`
-  only when neither binding nor synthesis applies.
+- Playwright step generation driven by the 3rd LLM prompt
+  (`steps_plan`) — one Python statement per unique Gherkin step text,
+  AST-validated against POM methods and the SELECTORS catalogue before
+  writing. Falls back to deterministic synthesis, then to
+  `NotImplementedError` when neither applies.
+- **Cross-page awareness** — the 2nd and 3rd prompts receive a
+  `known_pages` snapshot of sibling pages (slug + url + POM class)
+  so scenarios can bind cross-page nav to real URLs instead of
+  guessing at the current page's elements.
 - **Runtime self-heal on generated POM actions** — `BasePage.click /
   check / fill / select` auto-unblock disabled targets by ticking
-  visible consent checkboxes before retrying. This is the main
-  defence against local-LLM scenario-order mistakes and minor DOM
-  drift between extraction and test time.
+  visible consent checkboxes before retrying. They also **rewrap
+  Playwright timeouts into diagnostic AssertionError messages** that
+  name the root cause (element not found / hidden / disabled /
+  detached) instead of the generic "Timeout 30000ms exceeded".
 - Generation quality gate: a URL whose step file still has
   `NotImplementedError` bodies ends up `needs_implementation`, not
   `complete`, and the run summary switches to `run_done_with_issues`.
 - **Heal stage** (`autocoder heal`) — fills the stubs via the LLM
   with AST-validated single-statement bodies.
-- **Runtime-failure heal** (`autocoder heal --from-pytest`) — runs
-  pytest, captures Playwright errors, asks the LLM for revised
-  bodies (up to 5 statements so prerequisites are expressible).
+- **Runtime-failure heal** (`autocoder heal --from-pytest` or the
+  `AUTOCODER_AUTOHEAL=true` pytest plugin) — captures Playwright
+  errors, asks the LLM for revised bodies (up to 5 statements so
+  prerequisites are expressible), and patches the step file in place.
+- **Failure categorisation** — the HTML report splits failures into
+  Frontend (product bug), Script (test-code bug), and Environment
+  (flake) so tickets land with the right team.
+- **Playwright tracing** — every test's actions are recorded, and
+  traces for failing tests are kept under `manifest/traces/` for
+  postmortem via `npx playwright show-trace`.
+- **Session liveness probe** — auto-auth re-runs when the saved
+  `.auth/user.json` is missing *or when its cookies have expired*,
+  so stale sessions don't silently fail every test.
 - Tracking and resume via `manifest/registry.yaml`. Per-URL
   failures don't abort the whole run — failed URLs are marked and
   the loop continues.

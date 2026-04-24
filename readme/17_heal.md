@@ -152,3 +152,48 @@ a fresh problem, but identical failures on rerun are free.
 | `--force` | Bypass the on-disk cache; re-call the LLM for every target. |
 | `--from-pytest` | Run pytest first and heal whatever failed. |
 | `--junit-xml PATH` | Heal from an existing JUnit-XML report instead of running pytest. |
+
+## Failure categorisation in the report
+
+Once pytest has run at least once, `autocoder report --run` and the
+auto-generated `manifest/report.html` slot every failure into one of
+four buckets so the right team can pick it up:
+
+| Category | What it means | Who fixes it |
+|---|---|---|
+| **Frontend** (`disabled`, `intercepted`, `wrong_kind`, `not_visible`) | The UI behaved differently than the scenario expected. A real product bug. | App team |
+| **Script** (`locator_not_found`, `not_attached`, plus any `ImportError` / `SyntaxError` / `NameError` / `AttributeError` / `TypeError` / …) | The test code is wrong — stale selector, bad POM, heal mis-fire. | Autocoder maintainer / rerun heal |
+| **Environment** (`timeout`) | Opaque timeout, flake, slow network, expired session. | Retry / investigate |
+| **Other** | Assertion failures without a known bucket token. | Manual triage |
+
+The report's **Failure ownership** cards show per-category totals
+at the top, followed by one collapsible table per category (frontend
++ script expanded by default). The rich-text `autocoder report`
+summary ends with a `Frontend / Script / Env / Other` row when any
+test failed. JSON output from `autocoder report --json` carries
+`failure_category_totals` plus a per-scenario `failure_class` /
+`category` so CI can route tickets programmatically.
+
+## Playwright traces for failing tests
+
+`AUTOCODER_TRACE=true` (default on) tells the `context` fixture in
+`tests/conftest.py` to record a Playwright trace for every test.
+Passing tests stop tracing without writing; failing tests dump to
+`manifest/traces/<timestamp>_<nodeid>.zip` and the path is printed
+in yellow at end-of-test.
+
+View one:
+
+```bash
+npx playwright show-trace manifest/traces/1745241832_tests_steps_test_catalog_py__test_search.zip
+```
+
+You get the full step-by-step timeline: every action, DOM snapshot
+before + after, network tab, console logs, and the exact locator
+state at each frame.
+
+Turn tracing off for faster runs:
+
+```env
+AUTOCODER_TRACE=false
+```

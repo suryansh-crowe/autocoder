@@ -17,6 +17,7 @@ from typing import Any
 from playwright.sync_api import (
     Browser,
     BrowserContext,
+    Error as PWError,
     Page,
     Playwright,
     TimeoutError as PWTimeout,
@@ -263,8 +264,22 @@ def goto_resilient(
     page.on("popup", _on_popup)
 
     # Tier 1: commit — as soon as the first response byte arrives.
+    #
+    # MSAL-style SPAs frequently intercept the first navigation with a
+    # token-refresh redirect (the browser URL changes to an OAuth
+    # callback like ``/#code=...&state=...`` mid-goto), which surfaces
+    # to Playwright as:
+    #   ``Page.goto: Navigation to "<url>" is interrupted by another
+    #   navigation to "<callback>"``
+    # This is NOT a failure — the SPA will land back at the callback,
+    # finish the handshake, and settle. We catch that specific error,
+    # wait briefly for the handshake to resolve, and re-issue the
+    # original goto once.
+    def _do_goto() -> Any:
+        return page.goto(url, wait_until="commit", timeout=nav_timeout_ms)
+
     try:
-        resp = page.goto(url, wait_until="commit", timeout=nav_timeout_ms)
+        resp = _do_goto()
         diag.wait_strategy = "commit"
         diag.status = getattr(resp, "status", None) if resp is not None else None
     except PWTimeout:
@@ -274,6 +289,34 @@ def goto_resilient(
         if capture_on_timeout and diagnostics_dir is not None:
             _dump_timeout_artifacts(page, url, diagnostics_dir)
         raise AuthUnreachable(url, diag) from None
+    except PWError as exc:
+        if "interrupted by another navigation" not in str(exc):
+            raise
+        # Let the MSAL / OIDC callback finish resolving before we
+        # re-navigate. domcontentloaded usually fires within 5–10s
+        # on the callback URL; if it doesn't, we proceed anyway.
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=15_000)
+        except PWTimeout:
+            pass
+        logger.info(
+            "goto_redirect_retry",
+            url=logger.safe_url(url),
+            callback_url=logger.safe_url(page.url or ""),
+            hint="MSAL/OIDC redirect interrupted the first goto; re-issuing after callback settled",
+        )
+        try:
+            resp = _do_goto()
+            diag.wait_strategy = "commit"
+            diag.status = getattr(resp, "status", None) if resp is not None else None
+        except (PWTimeout, PWError):
+            # Second attempt also failed — surface an auth-unreachable
+            # diagnostic so the orchestrator can route to auth-first.
+            diag.final_url = page.url or url
+            diag.elapsed_s = time.monotonic() - started
+            if capture_on_timeout and diagnostics_dir is not None:
+                _dump_timeout_artifacts(page, url, diagnostics_dir)
+            raise AuthUnreachable(url, diag) from None
 
     # Tier 2: best-effort domcontentloaded.
     try:
@@ -284,9 +327,14 @@ def goto_resilient(
     except PWTimeout:
         pass
 
-    # Tier 3: best-effort networkidle (short budget — SPAs rarely settle).
+    # Tier 3: best-effort networkidle. Authenticated SPAs commonly
+    # fetch multiple XHRs on mount (auth refresh, user profile, first-
+    # page data) that don't settle inside a 5s budget; 15s handles the
+    # typical mid-sized app without penalizing pages that already
+    # idle quickly (the wait returns as soon as 500ms of network
+    # quiet is observed, regardless of the budget).
     try:
-        page.wait_for_load_state("networkidle", timeout=5_000)
+        page.wait_for_load_state("networkidle", timeout=15_000)
         diag.wait_strategy = diag.wait_strategy + "+networkidle"
     except PWTimeout:
         pass

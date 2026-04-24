@@ -87,6 +87,19 @@ class BrowserSettings:
 class ExtractionSettings:
     max_elements_per_page: int
     max_dependency_depth: int
+    # When True, after the first DOM scrape the extractor clicks a
+    # bounded set of "reveal" buttons (Filter, Sort, More, aria-haspopup)
+    # one at a time, re-scrapes the DOM delta, and merges the newly-
+    # revealed elements into the catalog. This captures filter options,
+    # menu items, chat response panels, etc. that live in the DOM only
+    # AFTER a user interaction. Set EXTRACTION_INTERACTIVE=false to
+    # disable if a reveal click ever misfires.
+    interactive: bool
+    # Upper bound on the number of reveal candidates the interactive
+    # pass will click per page. Each click costs ~3-5s (click + settle +
+    # re-scrape + dismiss), so 10 caps the extra extraction time at
+    # ~30-50s even on button-heavy pages.
+    interactive_max_candidates: int
 
 
 @dataclass(frozen=True)
@@ -219,6 +232,8 @@ def load_settings(project_root: Path | None = None) -> Settings:
         extraction=ExtractionSettings(
             max_elements_per_page=_int("MAX_ELEMENTS_PER_PAGE", 60),
             max_dependency_depth=_int("MAX_DEPENDENCY_DEPTH", 3),
+            interactive=_flag("EXTRACTION_INTERACTIVE", True),
+            interactive_max_candidates=_int("EXTRACTION_INTERACTIVE_MAX_CANDIDATES", 10),
         ),
         paths=paths,
     )

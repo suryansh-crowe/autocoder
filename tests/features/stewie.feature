@@ -1,36 +1,27 @@
-Feature: Stewie AI main page interaction
-  Covers chat, navigation, action buttons, and role selection validation.
+Feature: Stewie AI chat prompt submission, role selection, and cross-page navigation
+  Validates chat prompt submission and response, role selection effects, and navigation to Home with landmark assertion.
 
   Background:
-    Given User is on the Stewie AI main page
+    Given The user is on the Stewie AI page
 
   @smoke
-  Scenario: User sends a prompt to Stewie and receives a response
-    Given User enters a prompt in the Ask Stewie message box
-    When User clicks the Send button
-    Then The Conversations panel is displayed
+  Scenario: Submitting a chat prompt returns a visible response area
+    When The user enters 'List all assets within Finance domain.' in the chat prompt textbox
+    And The user clicks the Send button
+    Then A new conversation thread appears
+
+  @regression @validation
+  Scenario: Submitting an empty chat prompt disables the Send button
+    When The user clears the chat prompt textbox
+    Then The Send button becomes disabled
+
+  @smoke
+  Scenario: Selecting a role enables the chat prompt textbox
+    When The user selects 'Data Analyst' from the Choose role dropdown
+    Then The chat prompt textbox becomes enabled
 
   @regression @navigation
-  Scenario: User navigates to Data Catalog and sees the Data Catalog heading
-    When User clicks the Data Catalog button
-    Then The Data Catalog section is visible
-
-  @smoke
-  Scenario: User clicks the Ask Stewie button and sees the Ask Stewie message box
-    When User clicks the Ask Stewie button
-    Then The Ask Stewie message box is visible
-
-  @regression @validation
-  Scenario: User selects a role and the Send button becomes enabled
-    When User selects a role from the Choose role dropdown
-    Then The Send button is enabled
-
-  @regression @validation
-  Scenario: User attempts to send without selecting a role and sees a validation message
-    When User clicks the Send button without selecting a role
-    Then A validation message is displayed for role selection
-
-  @smoke
-  Scenario: User clicks the Notifications button and sees the Notifications panel
-    When User clicks the Notifications button
-    Then The Notifications panel is visible
+  Scenario: Navigating to Home displays the Stewie Terminal landmark
+    When The user clicks the Home button
+    Then The URL contains '/home'
+    And The 'Stewie Terminal' heading is displayed

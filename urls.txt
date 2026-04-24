@@ -5,8 +5,12 @@
 https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/home
 https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/stewie
 https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/catalog
-https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/source-connection
-https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/dq/insights
-https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/sources
-https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/agent
-https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/security
+
+# Additional URLs discovered from pytest run failures — clicking
+# "Data Quality" / "Agent Pipelines" lands on these paths, not the
+# LLM-invented /data-quality / /agent-pipelines. Uncomment to include
+# these pages in the next generation pass so cross-page nav scenarios
+# reference real destination URLs.
+# https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/dq/insights
+# https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/sources
+

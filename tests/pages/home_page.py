@@ -10,12 +10,17 @@ from __future__ import annotations
 
 from playwright.sync_api import Page, expect
 
+from tests import settings
 from tests.pages.base_page import BasePage
 from tests.support.locator_strategy import SelectorSpec
 
 
 class HomePage(BasePage):
-    URL = "https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/home"
+    # Path component only — the absolute URL is built at runtime from
+    # ``settings.BASE_URL`` so the same POM targets dev / staging / prod
+    # without regeneration. The extraction URL captured at generation
+    # time was: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/home
+    PATH = "/home"
     SELECTORS: dict[str, list[SelectorSpec]] = {
         'home': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Home'}, {'strategy': 'label', 'value': 'Home', 'role': 'button', 'name': 'Home'}, {'strategy': 'text', 'value': 'Home', 'role': 'button'}],
         'ask_stewie': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Ask Stewie'}, {'strategy': 'label', 'value': 'Ask Stewie', 'role': 'button', 'name': 'Ask Stewie'}, {'strategy': 'text', 'value': 'Ask Stewie', 'role': 'button'}],
@@ -31,12 +36,12 @@ class HomePage(BasePage):
         'refresh': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Refresh'}, {'strategy': 'text', 'value': 'Refresh', 'role': 'button'}],
         'html_1_body_1_div_1_div_2_div_2_div_1_div_2_div_1_div_1_div_1_div_1_div_2_button_2': [{'strategy': 'xpath', 'value': '/html[1]/body[1]/div[1]/div[2]/div[2]/div[1]/div[2]/div[1]/div[1]/div[1]/div[1]/div[2]/button[2]', 'role': 'button'}],
         'html_1_body_1_div_1_div_2_div_2_div_1_div_2_div_1_div_1_div_1_div_1_div_2_button_3': [{'strategy': 'xpath', 'value': '/html[1]/body[1]/div[1]/div[2]/div[2]/div[1]/div[2]/div[1]/div[1]/div[1]/div[1]/div[2]/button[3]', 'role': 'button'}],
-        'search_assets_terms_rules_type_for_suggestions': [{'strategy': 'placeholder', 'value': 'Search Assets, Terms, Rules... (Type @ for suggestions)', 'role': 'textbox'}],
+        'search_for_assets_terms_rules': [{'strategy': 'placeholder', 'value': 'Search for Assets, Terms, Rules...', 'role': 'textbox'}],
         'find_pii_risks': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Find PII risks'}, {'strategy': 'text', 'value': 'Find PII risks', 'role': 'button'}],
         'show_failing_rule_sets': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Show failing rule sets'}, {'strategy': 'text', 'value': 'Show failing rule sets', 'role': 'button'}],
         'pending_certification': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Pending certification'}, {'strategy': 'text', 'value': 'Pending certification', 'role': 'button'}],
-        'account_riskclassification_and_retentionperiod': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'ACCOUNT — RiskClassification and RetentionPeriod'}, {'strategy': 'text', 'value': 'ACCOUNT — RiskClassification and RetentionPeriod', 'role': 'button'}],
-        'account_account_relation_riskclassification_and_retentionperiod': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'ACCOUNT_ACCOUNT_RELATION — RiskClassification and RetentionPeriod'}, {'strategy': 'text', 'value': 'ACCOUNT_ACCOUNT_RELATION — RiskClassification and RetentionPeriod', 'role': 'button'}],
+        'gold_riskclassification_and_retentionperiod': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'gold — RiskClassification and RetentionPeriod'}, {'strategy': 'text', 'value': 'gold — RiskClassification and RetentionPeriod', 'role': 'button'}],
+        'd_calendar_riskclassification_and_retentionperiod': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'd_calendar — RiskClassification and RetentionPeriod'}, {'strategy': 'text', 'value': 'd_calendar — RiskClassification and RetentionPeriod', 'role': 'button'}],
         'view_all': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'View all'}, {'strategy': 'text', 'value': 'View all', 'role': 'button'}],
         'html_1_body_1_div_1_div_2_div_2_div_1_div_2_div_1_div_1_div_1_div_3_section_2_div_1_div_1_button_1': [{'strategy': 'xpath', 'value': '/html[1]/body[1]/div[1]/div[2]/div[2]/div[1]/div[2]/div[1]/div[1]/div[1]/div[3]/section[2]/div[1]/div[1]/button[1]', 'role': 'button'}],
         'all': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'All'}, {'strategy': 'text', 'value': 'All', 'role': 'button'}],
@@ -58,10 +63,32 @@ class HomePage(BasePage):
         'html_1_body_1_div_1_div_2_div_2_div_1_div_2_div_1_div_1_div_1_div_3_section_3_div_2_div_1_div_1_button_1': [{'strategy': 'xpath', 'value': '/html[1]/body[1]/div[1]/div[2]/div[2]/div[1]/div[2]/div[1]/div[1]/div[1]/div[3]/section[3]/div[2]/div[1]/div[1]/button[1]', 'role': 'button'}],
         'html_1_body_1_div_1_div_2_div_2_div_1_div_2_div_1_div_1_div_1_div_3_section_3_div_2_div_2_div_1_button_1': [{'strategy': 'xpath', 'value': '/html[1]/body[1]/div[1]/div[2]/div[2]/div[1]/div[2]/div[1]/div[1]/div[1]/div[3]/section[3]/div[2]/div[2]/div[1]/button[1]', 'role': 'button'}],
         'view_all_3': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'View all'}, {'strategy': 'text', 'value': 'View all', 'role': 'button'}],
+        'heading_stewie_terminal': [{'strategy': 'role_name', 'value': 'heading', 'role': 'heading', 'name': 'Stewie Terminal'}, {'strategy': 'text', 'value': 'Stewie Terminal', 'role': 'heading'}],
+        'heading_my_domain_health': [{'strategy': 'role_name', 'value': 'heading', 'role': 'heading', 'name': 'My Domain Health'}, {'strategy': 'text', 'value': 'My Domain Health', 'role': 'heading'}],
+        'heading_activity_feed': [{'strategy': 'role_name', 'value': 'heading', 'role': 'heading', 'name': 'Activity Feed'}, {'strategy': 'text', 'value': 'Activity Feed', 'role': 'heading'}],
+        'heading_ask_stewie': [{'strategy': 'role_name', 'value': 'heading', 'role': 'heading', 'name': 'Ask Stewie'}, {'strategy': 'text', 'value': 'Ask Stewie', 'role': 'heading'}],
+        'heading_admin_actions': [{'strategy': 'role_name', 'value': 'heading', 'role': 'heading', 'name': 'Admin Actions'}, {'strategy': 'text', 'value': 'Admin Actions', 'role': 'heading'}],
+        'heading_dq_failures': [{'strategy': 'role_name', 'value': 'heading', 'role': 'heading', 'name': 'DQ Failures'}, {'strategy': 'text', 'value': 'DQ Failures', 'role': 'heading'}],
     }
 
     def __init__(self, page: Page) -> None:
         super().__init__(page, self.SELECTORS)
+
+    @property
+    def URL(self) -> str:
+        """Absolute URL for this page, joined against ``settings.BASE_URL``.
+
+        Raises if ``BASE_URL`` is empty so a missing ``.env`` entry
+        fails loudly instead of silently hitting ``about:blank`` or
+        whatever Playwright does with a bare path.
+        """
+        base = (settings.BASE_URL or "").rstrip("/")
+        if not base:
+            raise RuntimeError(
+                "BASE_URL is not set in .env — add it so tests target "
+                "your environment (dev / staging / prod)."
+            )
+        return base + self.PATH
 
     def navigate(self) -> None:
         # ``domcontentloaded`` matches the extraction-time wait ladder
@@ -70,81 +97,149 @@ class HomePage(BasePage):
         self.page.goto(self.URL, wait_until="domcontentloaded")
 
     def click_home(self) -> None:
-        """Navigate to Home section"""
+        """navigate to home dashboard"""
         self.click('home')
 
     def click_ask_stewie(self) -> None:
-        """Open Ask Stewie dialog"""
+        """open Ask Stewie dialog"""
         self.click('ask_stewie')
 
     def click_data_catalog(self) -> None:
-        """Open Data Catalog section"""
+        """open Data Catalog section"""
         self.click('data_catalog')
 
     def click_source_connection(self) -> None:
-        """Open Source Connection section"""
+        """open Source Connection section"""
         self.click('source_connection')
 
     def click_data_quality(self) -> None:
-        """Open Data Quality section"""
+        """open Data Quality section"""
         self.click('data_quality')
 
     def click_agent_pipelines(self) -> None:
-        """Open Agent Pipelines section"""
+        """open Agent Pipelines section"""
         self.click('agent_pipelines')
 
     def click_agent_management(self) -> None:
-        """Open Agent Management section"""
+        """open Agent Management section"""
         self.click('agent_management')
 
     def click_security(self) -> None:
-        """Open Security section"""
+        """open Security section"""
         self.click('security')
 
     def click_notifications(self) -> None:
-        """Open Notifications section"""
+        """open Notifications panel"""
         self.click('notifications')
 
     def click_logout(self) -> None:
-        """Logout from application"""
+        """log out of Stewie AI"""
         self.click('logout')
 
+    def click_close_sidebar(self) -> None:
+        """close sidebar navigation"""
+        self.click('close_sidebar')
+
     def click_refresh(self) -> None:
-        """Refresh page content"""
+        """refresh dashboard data"""
         self.click('refresh')
 
-    def fill_search_assets(self, value: str) -> None:
-        """Fill asset search textbox"""
-        self.fill('search_assets_terms_rules_type_for_suggestions', value)
+    def fill_search_for_assets_terms_rules(self, value: str) -> None:
+        """fill search textbox for assets, terms, rules"""
+        self.fill('search_for_assets_terms_rules', value)
+
+    def submit_search_for_assets_terms_rules(self) -> None:
+        """submit search via Enter key"""
+        self.locate('search_for_assets_terms_rules').press('Enter')
+
+    def fill_ask_stewie_about_assets_rules_domains(self, value: str) -> None:
+        """fill Ask Stewie chat textbox"""
+        self.fill('ask_stewie_about_assets_rules_domains', value)
+
+    def submit_ask_stewie_about_assets_rules_domains(self) -> None:
+        """submit Ask Stewie chat via Enter key"""
+        self.locate('ask_stewie_about_assets_rules_domains').press('Enter')
 
     def click_find_pii_risks(self) -> None:
-        """Find PII risks"""
+        """find PII risks"""
         self.click('find_pii_risks')
 
     def click_show_failing_rule_sets(self) -> None:
-        """Show failing rule sets"""
+        """show failing rule sets"""
         self.click('show_failing_rule_sets')
 
     def click_pending_certification(self) -> None:
-        """Show pending certifications"""
+        """view pending certification"""
         self.click('pending_certification')
 
+    def click_gold_riskclassification_and_retentionperiod(self) -> None:
+        """view gold RiskClassification and RetentionPeriod"""
+        self.click('gold_riskclassification_and_retentionperiod')
+
+    def click_d_calendar_riskclassification_and_retentionperiod(self) -> None:
+        """view d_calendar RiskClassification and RetentionPeriod"""
+        self.click('d_calendar_riskclassification_and_retentionperiod')
+
     def click_view_all(self) -> None:
-        """View all items"""
+        """view all items"""
         self.click('view_all')
 
-    def fill_ask_stewie_about_assets(self, value: str) -> None:
-        """Fill Ask Stewie textbox"""
-        self.fill('ask_stewie_about_assets_rules_domains', value)
+    def click_all(self) -> None:
+        """filter by All"""
+        self.click('all')
+
+    def click_ownership(self) -> None:
+        """filter by Ownership"""
+        self.click('ownership')
+
+    def click_tags(self) -> None:
+        """filter by Tags"""
+        self.click('tags')
+
+    def click_pii(self) -> None:
+        """filter by PII"""
+        self.click('pii')
+
+    def click_rules(self) -> None:
+        """filter by Rules"""
+        self.click('rules')
+
+    def click_view_all_2(self) -> None:
+        """view all items (second instance)"""
+        self.click('view_all_2')
 
     def click_view_full_chat_history(self) -> None:
-        """View full chat history"""
+        """view full chat history"""
         self.click('view_full_chat_history')
 
     def click_ask(self) -> None:
-        """Submit Ask Stewie question"""
+        """submit Ask Stewie chat"""
         self.click('ask')
 
-    def click_close_sidebar(self) -> None:
-        """Close sidebar menu"""
-        self.click('close_sidebar')
+    def click_view_all_3(self) -> None:
+        """view all items (third instance)"""
+        self.click('view_all_3')
+
+    def expect_heading_stewie_terminal(self) -> None:
+        """assert Stewie Terminal heading is visible"""
+        expect(self.locate('heading_stewie_terminal')).to_be_visible()
+
+    def expect_heading_my_domain_health(self) -> None:
+        """assert My Domain Health heading is visible"""
+        expect(self.locate('heading_my_domain_health')).to_be_visible()
+
+    def expect_heading_activity_feed(self) -> None:
+        """assert Activity Feed heading is visible"""
+        expect(self.locate('heading_activity_feed')).to_be_visible()
+
+    def expect_heading_ask_stewie(self) -> None:
+        """assert Ask Stewie heading is visible"""
+        expect(self.locate('heading_ask_stewie')).to_be_visible()
+
+    def expect_heading_admin_actions(self) -> None:
+        """assert Admin Actions heading is visible"""
+        expect(self.locate('heading_admin_actions')).to_be_visible()
+
+    def expect_heading_dq_failures(self) -> None:
+        """assert DQ Failures heading is visible"""
+        expect(self.locate('heading_dq_failures')).to_be_visible()

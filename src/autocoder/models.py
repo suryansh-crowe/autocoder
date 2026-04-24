@@ -100,6 +100,12 @@ class Element(BaseModel):
     required: bool = False
     visible: bool = True
     enabled: bool = True
+    # Populated by the interactive-extraction pass when this element was
+    # captured AFTER clicking a reveal button (filter, menu trigger,
+    # dropdown toggle). The value is the ``id`` of the button that
+    # opened this element's panel. ``None`` for elements captured in the
+    # initial at-load DOM scrape.
+    revealed_by: str | None = None
 
 
 class FormSpec(BaseModel):
@@ -250,7 +256,17 @@ class POMMethod(BaseModel):
     name: str
     intent: str
     element_id: str
-    action: Literal["click", "fill", "check", "select", "navigate", "wait", "expect_visible", "expect_text"]
+    action: Literal[
+        "click",
+        "fill",
+        "check",
+        "select",
+        "navigate",
+        "wait",
+        "expect_visible",
+        "expect_text",
+        "press_enter",
+    ]
     args: list[str] = Field(default_factory=list)
     returns: str | None = None
 
@@ -298,3 +314,38 @@ class ScenarioPlan(BaseModel):
 
 
 FeaturePlan.model_rebuild()
+
+
+# ---------------------------------------------------------------------------
+# Steps plan (prompt 3 output) — one body per unique Gherkin step
+# ---------------------------------------------------------------------------
+
+
+class StepBinding(BaseModel):
+    """One step-text → Playwright body mapping produced by prompt 3."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    step_text: str
+    body: str = ""
+    intent: str = ""
+
+
+class StepsPlan(BaseModel):
+    """JSON action plan — Playwright bodies for every Gherkin step.
+
+    One entry per *unique* step text (same text reused across scenarios
+    is bound once; the renderer stacks decorators on the single Python
+    function).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    bindings: list[StepBinding] = Field(default_factory=list)
+
+    def body_for(self, step_text: str) -> str | None:
+        """Return the LLM-authored body for ``step_text`` if known."""
+        for b in self.bindings:
+            if b.step_text == step_text:
+                return b.body or None
+        return None

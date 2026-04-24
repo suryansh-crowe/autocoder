@@ -5,30 +5,25 @@ action-level self-heal wrappers (:meth:`click`, :meth:`check`,
 :meth:`fill`, :meth:`select`) that generated POMs call instead of
 raw Playwright methods.
 
-Why action-level self-heal
---------------------------
+Two capabilities layered on top of the raw Playwright Locator:
 
-Generated POMs are produced by a local LLM and populated from a
-snapshot extraction. Both sources are fallible:
+* **Consent-checkbox unblock** — when a click/check/fill target is
+  disabled, look for visible unchecked checkboxes on the page
+  (native and ARIA ``role=checkbox``) and try ticking them one at a
+  time. After each tick, re-probe the target; if it becomes enabled
+  we proceed.
+* **Diagnostic timeout rewrap** — when a Playwright action times out,
+  the raw error is an opaque "Timeout 30000ms exceeded". We catch it
+  and re-raise an :class:`AssertionError` that names *why* the action
+  never landed (element missing from DOM / ambiguous selector /
+  hidden / disabled / detached / genuinely timed out). The new
+  message is what the failing test's traceback shows and what the
+  heal layer's ``failure_class`` classifier reads.
 
-* The LLM may order scenario steps in a way that triggers a
-  disabled-until-consent button before the consent control has been
-  activated. Without self-heal, every such scenario fails with
-  ``Locator.click: Timeout 30000ms exceeded. - element is not enabled``.
-* A DOM captured during extraction can drift slightly by test time
-  (a checkbox may default to unchecked instead of remembered-checked;
-  an animation may still be running).
-
-The wrappers below apply the same unblock tactic the orchestrator's
-auth runner uses: when a click / check / fill target is disabled,
-look for visible unchecked checkboxes on the page (native and ARIA
-``role=checkbox``) and try ticking them one at a time. After each
-tick, re-probe the target; if it becomes enabled we proceed.
-
-The heal is **opt-in per call** via the ``heal`` argument (defaults
-to ``True``). Pass ``heal=False`` to explicitly assert a disabled
-state, e.g. in a negative scenario that tests "submit stays disabled
-without consent".
+The heal layer is **opt-in per call** via the ``heal`` argument
+(defaults to ``True``). Pass ``heal=False`` to explicitly assert a
+disabled state, e.g. in a negative scenario that tests "submit stays
+disabled without consent".
 """
 
 from __future__ import annotations
@@ -84,13 +79,19 @@ class BasePage:
         by one and retry the click. When ``heal=False`` we call
         ``.click()`` directly — use this from negative scenarios that
         explicitly verify a disabled state.
+
+        On timeout, re-raises with a diagnostic message explaining
+        *why* the click never landed instead of an opaque
+        ``TimeoutError``.
         """
         locator = self.locate(element_id)
         if heal and not self._is_enabled(locator):
             if self._unblock_via_consent(locator):
-                # pathing worked; fall through to normal click
-                pass
-        locator.click(timeout=timeout_ms)
+                pass  # fall through to normal click
+        try:
+            locator.click(timeout=timeout_ms)
+        except PWTimeout as exc:
+            self._diagnose(element_id, "click", locator, exc)
 
     def check(self, element_id: str, *, heal: bool = True, timeout_ms: int = 10_000) -> None:
         """Check ``element_id``. Idempotent — does nothing if already checked."""
@@ -101,7 +102,10 @@ class BasePage:
                     return
             except Exception:
                 pass
-        locator.check(timeout=timeout_ms)
+        try:
+            locator.check(timeout=timeout_ms)
+        except PWTimeout as exc:
+            self._diagnose(element_id, "check", locator, exc)
 
     def fill(
         self,
@@ -116,7 +120,10 @@ class BasePage:
         if heal:
             with contextlib.suppress(Exception):
                 locator.fill("", timeout=2_000)
-        locator.fill(value, timeout=timeout_ms)
+        try:
+            locator.fill(value, timeout=timeout_ms)
+        except PWTimeout as exc:
+            self._diagnose(element_id, "fill", locator, exc)
 
     def select(
         self,
@@ -129,7 +136,10 @@ class BasePage:
         locator = self.locate(element_id)
         if heal and not self._is_enabled(locator):
             self._unblock_via_consent(locator)
-        locator.select_option(value, timeout=timeout_ms)
+        try:
+            locator.select_option(value, timeout=timeout_ms)
+        except PWTimeout as exc:
+            self._diagnose(element_id, "select", locator, exc)
 
     # ------------------------------------------------------------------
     # Self-heal primitives
@@ -185,3 +195,84 @@ class BasePage:
                 if self._is_enabled(target):
                     return True
         return self._is_enabled(target)
+
+    # ------------------------------------------------------------------
+    # Diagnostic rewrap — turns a raw Playwright timeout into an
+    # actionable AssertionError. Order of probes matters: we start
+    # with cheap, most-specific checks and widen outward.
+    # ------------------------------------------------------------------
+
+    def _diagnose(
+        self,
+        element_id: str,
+        action: str,
+        locator: Locator,
+        exc: Exception,
+    ) -> None:
+        """Raise an :class:`AssertionError` explaining why ``action`` failed.
+
+        The wrapped Playwright error is preserved in ``__cause__`` so
+        the raw traceback is still available in ``pytest -vv`` output.
+        The failure-class classifier in
+        :mod:`autocoder.heal.pytest_failures` reads the phrases
+        emitted here (``element is not enabled`` etc.) to route the
+        failure into the right bucket, so changes to the phrasing
+        below should preserve those tokens.
+        """
+        try:
+            count = locator.count()
+        except Exception:
+            count = -1
+        try:
+            visible = bool(locator.is_visible())
+        except Exception:
+            visible = False
+        try:
+            enabled = bool(locator.is_enabled())
+        except Exception:
+            enabled = True
+        try:
+            box = locator.bounding_box()
+        except Exception:
+            box = None
+
+        if count == 0:
+            msg = (
+                f"[{action} {element_id!r}] NO MATCH — selector resolved to 0 "
+                f"elements. Page changed since extraction; regenerate the POM "
+                f"or let the heal stage repair the selector. "
+                f"(no selector resolved)"
+            )
+        elif count > 1:
+            msg = (
+                f"[{action} {element_id!r}] AMBIGUOUS — {count} elements match "
+                f"the locator. Selector is too loose; tighten it or pick a "
+                f"`.nth()`."
+            )
+        elif not visible:
+            msg = (
+                f"[{action} {element_id!r}] HIDDEN — element is in the DOM but "
+                f"not visible (display:none, offscreen, or zero-size). "
+                f"(element is not visible)"
+            )
+        elif not enabled:
+            msg = (
+                f"[{action} {element_id!r}] DISABLED — element is visible but "
+                f"not interactive. Check whether a prerequisite step is "
+                f"missing (consent checkbox, form validation, loading spinner). "
+                f"(element is not enabled)"
+            )
+        elif box is None:
+            msg = (
+                f"[{action} {element_id!r}] DETACHED — element is in the DOM "
+                f"tree but has no bounding box. The SPA likely removed it "
+                f"between resolve + action. (element is not attached)"
+            )
+        else:
+            msg = (
+                f"[{action} {element_id!r}] TIMEOUT — element looks actionable "
+                f"but the operation never resolved. Usually a network-bound "
+                f"handler or an animation delaying the click target. "
+                f"(Timeout {action} exceeded)"
+            )
+        raise AssertionError(msg) from exc

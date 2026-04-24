@@ -22,12 +22,10 @@ playwright-report/
 test-results/
 trace.zip
 
-# Manifest payloads (registry stays; raw extractions/plans/logs/heals do not)
-manifest/extractions/
-manifest/plans/
-manifest/heals/
-manifest/logs/
-manifest/.cache/
+# Manifest — everything generated. registry.yaml names every internal
+# URL + login selectors, so we treat it like extractions/plans (local-only).
+# The autocoder creates this folder at runtime; no need to track it.
+manifest/
 
 # Editors / OS
 .vscode/

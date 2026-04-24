@@ -1,4 +1,4 @@
-"""Generated step definitions for 'Catalog page core interactions'."""
+"""Generated step definitions for 'Catalog page search, filter, pagination, and navigation'."""
 
 from __future__ import annotations
 
@@ -18,61 +18,111 @@ def catalog_page(page: Page) -> CatalogPage:
     return CatalogPage(page)
 
 
-@given(parsers.parse('User is on the Catalog page'))
-def _user_is_on_the_catalog_page(catalog_page: CatalogPage) -> None:
+@given(parsers.parse('The user is on the Catalog page'))
+def _the_user_is_on_the_catalog_page(catalog_page: CatalogPage) -> None:
     catalog_page.navigate()
 
 
-@given(parsers.parse('User enters a valid asset name in the search box'))
-def _user_enters_a_valid_asset_name_in_the_search_box(catalog_page: CatalogPage) -> None:
-    catalog_page.fill_search_assets('valid asset name')
+@when(parsers.parse("The user enters 'DQ-AGT-001' in the asset search box"))
+def _the_user_enters_dq_agt_001_in_the_asset_search_box(catalog_page: CatalogPage) -> None:
+    catalog_page.fill_search_assets('DQ-AGT-001')
 
 
-@when(parsers.parse('User clicks the Filter button'))
-def _user_clicks_the_filter_button(catalog_page: CatalogPage) -> None:
-    catalog_page.click_filter()
+@when(parsers.parse('The user submits the asset search'))
+def _the_user_submits_the_asset_search(catalog_page: CatalogPage) -> None:
+    catalog_page.submit_search_assets()
 
 
-@then(parsers.parse('Pagination controls are displayed'))
-def _pagination_controls_are_displayed(catalog_page: CatalogPage) -> None:
-    expect(catalog_page.locate('previous')).to_be_visible()
+@then(parsers.parse("The first results row contains 'DQ-AGT-001'"))
+def _the_first_results_row_contains_dq_agt_001(catalog_page: CatalogPage) -> None:
+    expect(catalog_page.page.get_by_text('DQ-AGT-001', exact=False)).to_be_visible()
 
 
-@given(parsers.parse('User leaves the search box empty'))
-def _user_leaves_the_search_box_empty(catalog_page: CatalogPage) -> None:
+@when(parsers.parse("The user enters 'zzzz_nonexistent_asset' in the asset search box"))
+def _the_user_enters_zzzz_nonexistent_asset_in_the_asse(catalog_page: CatalogPage) -> None:
+    catalog_page.fill_search_assets('zzzz_nonexistent_asset')
+
+
+@then(parsers.parse("The results area shows 'No matching assets'"))
+def _the_results_area_shows_no_matching_assets(catalog_page: CatalogPage) -> None:
+    expect(catalog_page.page.get_by_text('No matching assets', exact=False)).to_be_visible()
+
+
+@when(parsers.parse('The user clears the asset search box'))
+def _the_user_clears_the_asset_search_box(catalog_page: CatalogPage) -> None:
     catalog_page.fill_search_assets('')
 
 
-@then(parsers.parse('Pagination controls remain unchanged'))
-def _pagination_controls_remain_unchanged(catalog_page: CatalogPage) -> None:
-    expect(catalog_page.locate('previous')).to_be_visible()
+@then(parsers.parse('The results row count remains the same as before search'))
+def _the_results_row_count_remains_the_same_as_before_s(catalog_page: CatalogPage) -> None:
+    raise NotImplementedError('Implement step: The results row count remains the same as before search')
 
 
-@when(parsers.parse('User clicks the Home button'))
-def _user_clicks_the_home_button(catalog_page: CatalogPage) -> None:
+@when(parsers.parse('The user clicks the Filter button'))
+def _the_user_clicks_the_filter_button(catalog_page: CatalogPage) -> None:
+    catalog_page.click_filter()
+
+
+@then(parsers.parse('The filter panel becomes visible'))
+def _the_filter_panel_becomes_visible(catalog_page: CatalogPage) -> None:
+    raise NotImplementedError('Implement step: The filter panel becomes visible')
+
+
+@when(parsers.parse('The user clicks the Next pagination button'))
+def _the_user_clicks_the_next_pagination_button(catalog_page: CatalogPage) -> None:
+    catalog_page.click_next_page()
+
+
+@then(parsers.parse("The pagination indicator reads 'Page 2'"))
+def _the_pagination_indicator_reads_page_2(catalog_page: CatalogPage) -> None:
+    expect(catalog_page.page.get_by_text('Page 2', exact=False)).to_be_visible()
+
+
+@when(parsers.parse('The user clicks the Previous pagination button'))
+def _the_user_clicks_the_previous_pagination_button(catalog_page: CatalogPage) -> None:
+    catalog_page.click_previous_page()
+
+
+@then(parsers.parse("The pagination indicator reads 'Page 1'"))
+def _the_pagination_indicator_reads_page_1(catalog_page: CatalogPage) -> None:
+    expect(catalog_page.page.get_by_text('Page 1', exact=False)).to_be_visible()
+
+
+@when(parsers.parse('The user clicks pagination page 192'))
+def _the_user_clicks_pagination_page_192(catalog_page: CatalogPage) -> None:
+    catalog_page.click_page_192()
+
+
+@then(parsers.parse('The Next pagination button becomes disabled'))
+def _the_next_pagination_button_becomes_disabled(catalog_page: CatalogPage) -> None:
+    expect(catalog_page.locate('next')).to_be_disabled()
+
+
+@when(parsers.parse('The user clicks the Home button'))
+def _the_user_clicks_the_home_button(catalog_page: CatalogPage) -> None:
     catalog_page.click_home()
 
 
-@then(parsers.parse('The Catalog heading is visible'))
-def _the_catalog_heading_is_visible(catalog_page: CatalogPage) -> None:
-    expect(catalog_page.locate('data_catalog')).to_be_visible()
+@then(parsers.parse("The URL contains '/home'"))
+def _the_url_contains_home(catalog_page: CatalogPage) -> None:
+    expect(catalog_page.page).to_have_url(re.compile('/home(?:[/?#]|$)'))
 
 
-@when(parsers.parse('User clicks the Close sidebar button'))
-def _user_clicks_the_close_sidebar_button(catalog_page: CatalogPage) -> None:
-    catalog_page.click_close_sidebar()
+@then(parsers.parse('The Home page landmark is visible'))
+def _the_home_page_landmark_is_visible(catalog_page: CatalogPage) -> None:
+    expect(catalog_page.page.get_by_text('Stewie Terminal', exact=False)).to_be_visible()
 
 
-@when(parsers.parse('User clicks the Ask Stewie button'))
-def _user_clicks_the_ask_stewie_button(catalog_page: CatalogPage) -> None:
+@when(parsers.parse('The user clicks the Ask Stewie button'))
+def _the_user_clicks_the_ask_stewie_button(catalog_page: CatalogPage) -> None:
     catalog_page.click_ask_stewie()
 
 
-@then(parsers.parse('The Stewie assistant panel is displayed'))
-def _the_stewie_assistant_panel_is_displayed(catalog_page: CatalogPage) -> None:
-    expect(catalog_page.locate('open_stewie_assistant')).to_be_visible()
+@then(parsers.parse("The URL contains '/stewie'"))
+def _the_url_contains_stewie(catalog_page: CatalogPage) -> None:
+    expect(catalog_page.page).to_have_url(re.compile('/stewie(?:[/?#]|$)'))
 
 
-@when(parsers.parse('User clicks the Data Quality button'))
-def _user_clicks_the_data_quality_button(catalog_page: CatalogPage) -> None:
-    catalog_page.click_data_quality()
+@then(parsers.parse('The Stewie Assistant landmark is visible'))
+def _the_stewie_assistant_landmark_is_visible(catalog_page: CatalogPage) -> None:
+    expect(catalog_page.page.get_by_text('Conversations', exact=False)).to_be_visible()

@@ -208,8 +208,11 @@ Covered in `06_auth_first.md`. The renderer ships four templates —
 and `email_only` (shared with `magic_link` / `otp_code`) — and
 `render_auth_setup(spec)` picks the right one from `spec.auth_kind`.
 Same principle: deterministic template, secrets only via
-`os.environ.get(...)`, single `@pytest.mark.auth_setup` test that
-writes `.auth/user.json`.
+`tests.settings.get_required("LOGIN_USERNAME")` /
+`settings.get_optional("LOGIN_PASSWORD")` (which funnel every
+`.env` read through the single `tests/settings.py` loader — no
+generated file touches `os.environ` directly), single
+`@pytest.mark.auth_setup` test that writes `.auth/user.json`.
 
 ## What the generator covers — and what it doesn't
 

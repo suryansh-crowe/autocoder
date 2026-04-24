@@ -1,0 +1,30 @@
+{
+  "version": 2,
+  "prompts": [
+    {
+      "name": "pom_plan",
+      "description": "Prompt 1 — turn the extracted control catalog into a POM method plan. Exposes THREE method classes (user actions, keyboard submits, verification helpers) so the downstream feature-plan and steps-plan stages always have a real submit target and a real consequence assertion to bind against.",
+      "source_constant": "POM_SYSTEM"
+    },
+    {
+      "name": "feature_plan",
+      "description": "Prompt 2 — turn page extraction + POM methods + preload visibility + submit methods into consequence-verified Gherkin scenarios. Rejects zero-action, duplicate-action, phantom-submit, preexisting-element, and re-assert-target scenarios.",
+      "source_constant": "FEATURE_SYSTEM"
+    },
+    {
+      "name": "steps_plan",
+      "description": "Prompt 3 — bind every unique Gherkin step to exactly one Playwright statement. Enforces five bans (DUPLICATE-ACTION BODY, PREEXISTING-ELEMENT VISIBILITY, PHANTOM SUBMIT, RE-ASSERT WHEN TARGET, METHOD-STEP TOKEN MISMATCH) so the test file does not ship silently-wrong bindings.",
+      "source_constant": "STEPS_SYSTEM"
+    },
+    {
+      "name": "heal_stub",
+      "description": "Self-heal (stub fill) — write the body for a step that ended up as NotImplementedError after generation. Enforces three hard bans (CONSEQUENCE-NOT-TARGET, NO PHANTOM SUBMIT, NO PREEXISTING-ELEMENT VISIBILITY) so heal cannot produce a silently-wrong binding.",
+      "source_constant": "HEAL_SYSTEM"
+    },
+    {
+      "name": "heal_failure",
+      "description": "Self-heal (runtime failure) — rewrite a step body that threw at pytest time, using the error message + current body as context. Enforces the same PHANTOM SUBMIT and PREEXISTING-ELEMENT VISIBILITY bans the generate stage enforces, so heal does not regress the test into a trivially-green state.",
+      "source_constant": "FAILURE_HEAL_SYSTEM"
+    }
+  ]
+}

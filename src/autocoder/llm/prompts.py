@@ -1,13 +1,19 @@
 """Prompt builders.
 
-Two prompts are sent to the model. Both ask for *only* a JSON object:
+Three prompts are sent to the model, once per target page. All three
+ask for *only* a JSON object:
 
-* :func:`build_pom_prompt`     — page object plan
-* :func:`build_feature_prompt` — Gherkin feature plan
+* :func:`build_pom_prompt`     — page object plan              (prompt 1)
+* :func:`build_feature_prompt` — per-control-type Gherkin       (prompt 2)
+* :func:`build_steps_prompt`   — Playwright body per Gherkin step (prompt 3)
 
-Both prompts contain just the compact element catalog (id + role + name
-+ kind), nothing else. No DOM dumps, no full a11y trees, no source
-code. That is what keeps the input under ~1k tokens for typical pages.
+All three prompts contain just the compact element catalog
+(id + role + name + kind) plus plan metadata — no DOM dumps, no full
+a11y trees, no source code. That keeps the total input under ~1.5k
+tokens for typical pages. ``known_pages`` is an optional list that
+names the OTHER pages discovered in this run so the AI can reason
+about cross-page navigation (e.g., "User clicks Catalog" is a nav
+away from the current POM toward the ``catalog`` page).
 """
 
 from __future__ import annotations
@@ -16,138 +22,16 @@ import json
 from typing import Iterable
 
 from autocoder.models import Element, PageExtraction
+from autocoder.prompts import load_system
 
 
 # ---------------------------------------------------------------------------
 # System prompts
 # ---------------------------------------------------------------------------
 
-POM_SYSTEM = """You are a planner for a Playwright test generator.
-Output a single JSON object — no prose, no markdown.
+POM_SYSTEM = load_system('pom_plan')
 
-Schema:
-{
-  "class_name": "<CamelCase>Page",
-  "fixture_name": "<snake_case_page>",
-  "methods": [
-    {"name": "<snake_case>", "intent": "<<= 60 chars>",
-     "element_id": "<id from elements>",
-     "action": "click|fill|check|select|navigate|wait|expect_visible|expect_text",
-     "args": ["<arg names if action needs values>"]}
-  ]
-}
-
-Rules:
-- Use ONLY element ids that appear in the input list.
-- Choose `action` based on element kind:
-    button/link/tab/menuitem -> click
-    input/textarea            -> fill   (args=["value"])
-    select                    -> select (args=["value"])
-    checkbox/radio            -> check
-    heading                   -> expect_visible
-- Method names: short verb_object form (click_login, fill_email).
-- 1 method per element you intend to expose. Skip purely decorative ones.
-- Keep total methods <= 20.
-"""
-
-FEATURE_SYSTEM = """You are a planner for a Playwright BDD generator.
-Output a single JSON object — no prose, no markdown.
-
-Schema:
-{
-  "feature": "<one line>",
-  "description": "<one line>",
-  "background": [{"keyword": "Given", "text": "<step text>", "pom_method": "<method>", "args": []}],
-  "scenarios": [
-    {
-      "title": "<one line>",
-      "tier": "smoke|sanity|regression|happy|edge|validation|navigation|auth|rbac|e2e",
-      "steps": [
-        {"keyword": "Given|When|Then|And", "text": "<step text>",
-         "pom_method": "<method or null>", "args": []}
-      ]
-    }
-  ]
-}
-
-Core rules:
-- Step text must be plain English, present tense, no Gherkin keyword inside the text.
-- Reference ONLY pom methods that appear in the provided list. If a step is a pure
-  assertion that does not map to a method, set pom_method to null.
-- Avoid duplicate scenarios. Keep each scenario <= 6 steps. Total scenarios: 3-8.
-
-COMPONENT-AWARE TEST COVERAGE
------------------------------
-The user prompt carries a `ui_inventory` block that counts the kinds of
-components actually rendered on the page. Use it to decide which test
-types to generate. Each present component MUST produce at least one
-dedicated scenario. Absent components MUST NOT produce scenarios.
-
-Heuristics:
-- search boxes (inventory.search > 0)
-  → generate at least TWO search scenarios:
-    (a) typed-query path: enter a real query, click Filter/Submit, and
-        assert a *results indicator* appears. The results indicator
-        MUST be an element that represents data/rows/pagination
-        (inventory.data entries, pagination buttons like "Next" /
-        "Previous" / numbered page buttons) — never the search box,
-        the filter button, or a page-chrome heading that is already
-        visible before the search.
-    (b) empty-query path: submit the search empty and assert either
-        a validation message or the pagination/results stays in its
-        unfiltered state. Tier=validation.
-  Do NOT assert a heading/title that was already visible on page load
-  as the search "result" — that passes trivially and tests nothing.
-- chat / ask / question textboxes (inventory.chat > 0)
-  → generate a chat interaction scenario: type a prompt, send, assert
-    the response / message area becomes visible (NOT the input).
-- forms (inventory.forms > 0)
-  → generate TWO scenarios: (a) valid submission happy path, and
-    (b) validation — submit empty / invalid input and assert the
-    error/helper text is visible.
-- navigation links/tabs (inventory.nav > 0)
-  → generate a navigation scenario: click a distinct nav target and
-    assert the URL changed OR a landmark heading for that target
-    appears.
-- action buttons (inventory.buttons > 0)
-  → generate one action-based scenario per distinct, non-nav button
-    (up to 3). Assert the CONSEQUENCE of the click (a dialog,
-    heading, toast, new section) — never re-assert the button that
-    was clicked.
-- checkboxes / radios / selects (inventory.choices > 0)
-  → generate a validation scenario that toggles the control and
-    asserts a dependent element becomes enabled/visible.
-- data table / list (inventory.data > 0)
-  → generate a scenario that opens a row or sorts/filters the table
-    and asserts the row detail or updated list is visible.
-
-THEN-STEP QUALITY (very important)
-----------------------------------
-Every `Then` step must describe a CONSEQUENCE, not the action target.
-Bad (re-asserts the thing just clicked):
-  When User clicks the "Open Stewie assistant" button
-  Then User sees the "Open Stewie assistant" interface   ← avoid
-
-Good (asserts the resulting UI state):
-  When User clicks the "Open Stewie assistant" button
-  Then The Stewie chat panel is displayed
-  Then The Ask Stewie message box is visible
-
-Prefer Then-step subjects that name a DIFFERENT element id / heading
-than the When-step subject. Reference headings from the provided
-`headings` list when naming post-action screens.
-
-TIER SELECTION
---------------
-- smoke: 1-2 scenarios covering the primary action of the page.
-- happy: 1-2 scenarios covering the main user flow end-to-end.
-- validation: 1+ scenarios for each form present (empty / invalid input).
-- navigation: 1 scenario when nav links are present.
-- edge: optional — only when the page clearly has edge conditions
-  (pagination controls, max-length inputs, disabled-button states).
-Only generate scenarios for tiers listed in `tiers`. If a tier has
-no meaningful coverage on this page, skip it rather than padding.
-"""
+FEATURE_SYSTEM = load_system('feature_plan')
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +58,45 @@ _NAV_HINTS = ("home", "back", "menu", "nav", "sidebar", "tab", "dashboard")
 _DATA_HINTS = ("row", "cell", "table", "list", "grid", "pagination", "page")
 _SUBMIT_HINTS = ("submit", "send", "save", "apply", "confirm", "continue")
 _PAGINATION_HINTS = ("next", "previous", "prev", "page ", "pagination")
+
+
+# POM method name fragments that identify a state-changing submit.
+# Consumed by ``_submit_method_names`` to populate ``submit_methods``
+# in the feature-plan payload — the prompt uses this list to enforce
+# the PHANTOM SUBMIT ban. Keep in sync with the hint sets above.
+_SUBMIT_METHOD_HINTS = (
+    "submit", "send", "save", "apply", "confirm", "continue",
+    "filter", "search", "ask", "next", "login", "signin",
+)
+
+
+def _submit_method_names(pom_methods: Iterable[str]) -> list[str]:
+    """POM methods that count as a real submit trigger for a form/search.
+
+    The feature-plan and steps-plan prompts need to know which
+    pom_methods legitimately fire a form/search submission. Three
+    shapes qualify:
+
+    * ``submit_*`` — the canonical POM-level submit method. Emitted
+      by the POM planner for search/chat/form inputs that lack an
+      adjacent submit button (action=``press_enter``).
+    * ``press_enter_*`` — legacy / explicit keyboard-submit naming.
+    * ``click_*<submit-hint>*`` — click on a submit/filter/search
+      button whose method name carries a submit keyword.
+    """
+    out: list[str] = []
+    for name in pom_methods:
+        if not name:
+            continue
+        lname = name.lower()
+        if lname.startswith("submit_") or lname.startswith("press_enter"):
+            out.append(name)
+            continue
+        if not lname.startswith("click_"):
+            continue
+        if any(h in lname for h in _SUBMIT_METHOD_HINTS):
+            out.append(name)
+    return out
 
 
 def _has_hint(element: Element, hints: tuple[str, ...]) -> bool:
@@ -259,8 +182,20 @@ def build_feature_prompt(
     *,
     pom_method_names: list[str],
     requested_tiers: list[str],
+    known_pages: list[dict] | None = None,
 ) -> str:
     inventory = build_ui_inventory(extraction)
+    # ``preload_visible_ids`` is the set of elements that were already
+    # on the page at extraction time. The feature-plan prompt uses it
+    # to reject Then-steps that assert visibility on page-chrome that
+    # existed before the action — those assertions pass trivially and
+    # test nothing.
+    preload_visible_ids = [e.id for e in extraction.elements if e.visible]
+    # ``submit_methods`` is the subset of POM methods that count as a
+    # real form/search submit trigger. The prompt uses this to reject
+    # PHANTOM SUBMIT scenarios — attempts to "submit" when no submit
+    # target exists.
+    submit_methods = _submit_method_names(pom_method_names)
     payload = {
         "url": extraction.final_url,
         "title": extraction.title,
@@ -269,6 +204,9 @@ def build_feature_prompt(
         "elements": _compact_elements(extraction.elements),
         "tiers": requested_tiers,
         "ui_inventory": inventory,
+        "known_pages": list(known_pages or []),
+        "preload_visible_ids": preload_visible_ids,
+        "submit_methods": submit_methods,
     }
     return (
         "Build a feature plan for this page. Use `ui_inventory` to pick "
@@ -276,6 +214,102 @@ def build_feature_prompt(
         "submit + validation, nav → navigation, buttons → action with "
         "CONSEQUENCE assertions). Every Then step must name a DIFFERENT "
         "element than its When step. Reuse existing pom_methods where "
-        "possible; set pom_method=null for pure assertions.\n\n"
+        "possible; set pom_method=null for pure assertions. When a link "
+        "or button targets one of the `known_pages`, write the scenario "
+        "as a CROSS-PAGE navigation — the Then step should reference the "
+        "target page's URL or a landmark that only appears there. Obey "
+        "the five hard bans in the system prompt (ZERO-ACTION, "
+        "DUPLICATE ACTION, PHANTOM SUBMIT, PREEXISTING-ELEMENT "
+        "ASSERTION, RE-ASSERT WHEN TARGET) — use `preload_visible_ids` "
+        "and `submit_methods` to self-check before emitting.\n\n"
+        + json.dumps(payload, separators=(",", ":"))
+    )
+
+
+# ---------------------------------------------------------------------------
+# Prompt 3 — Playwright step bodies (one per unique Gherkin step)
+# ---------------------------------------------------------------------------
+
+
+STEPS_SYSTEM = load_system('steps_plan')
+
+
+def build_steps_prompt(
+    extraction: PageExtraction,
+    *,
+    feature_plan_scenarios: list[dict],
+    feature_plan_background: list[dict],
+    pom_class: str,
+    pom_fixture: str,
+    pom_methods: list[dict],
+    known_pages: list[dict] | None = None,
+) -> str:
+    """Payload for :data:`STEPS_SYSTEM`.
+
+    Carries the feature plan's step texts (grouped by scenario), the
+    POM method catalog, the compact element catalog, and a compact
+    ``known_pages`` snapshot so the AI can bind cross-page nav steps
+    to URL-level assertions.
+
+    Also surfaces three validator-aligned sets so the binder can
+    self-avoid the same bans the steps validator enforces
+    downstream:
+
+    * ``preload_visible_ids`` — element ids visible at page load.
+      Rule 2 (PREEXISTING-ELEMENT VISIBILITY) forbids
+      ``to_be_visible`` assertions on these ids outside cross-page
+      nav scenarios.
+    * ``submit_methods`` — POM methods that count as real submit
+      triggers. Rule 3 (PHANTOM SUBMIT) forces submit-shaped steps
+      to bind to one of these, not to a re-fill.
+    * ``cross_page_nav_methods`` — POM methods whose click lands on
+      a ``known_pages`` sibling. Rule 2 uses this set to decide
+      whether a Then step was preceded by a cross-page navigation.
+    """
+    # Local import: :mod:`generate.steps` is a sibling package; importing
+    # at module-top would pull the generate package in during LLM-only
+    # code paths. Lazy-import keeps the dependency narrow.
+    from autocoder.generate.steps import nav_method_names
+
+    preload_visible_ids = [e.id for e in extraction.elements if e.visible]
+    pom_method_names = [str(m.get("name") or "") for m in pom_methods if m.get("name")]
+    submit_methods = _submit_method_names(pom_method_names)
+    cross_page_nav_methods = sorted(
+        nav_method_names(
+            (
+                (str(m.get("name") or ""), m.get("element_id"))
+                for m in pom_methods
+                if m.get("name")
+            ),
+            known_pages,
+        )
+    )
+
+    payload = {
+        "page_url": extraction.final_url,
+        "pom_class": pom_class,
+        "pom_fixture": pom_fixture,
+        "pom_methods": pom_methods,
+        "elements": _compact_elements(extraction.elements),
+        "known_pages": list(known_pages or []),
+        "preload_visible_ids": preload_visible_ids,
+        "submit_methods": submit_methods,
+        "cross_page_nav_methods": cross_page_nav_methods,
+        "feature_plan": {
+            "background": feature_plan_background,
+            "scenarios": feature_plan_scenarios,
+        },
+    }
+    return (
+        "Implement each unique Gherkin step as ONE Python statement. "
+        "Start scenarios with `<fixture>.navigate()` via the background. "
+        "Never re-assert the element that was just clicked/filled. "
+        "For cross-page jumps, assert the URL instead of re-asserting "
+        "the source page. Obey the five hard bans in the system "
+        "prompt (DUPLICATE-ACTION BODY, PREEXISTING-ELEMENT "
+        "VISIBILITY, PHANTOM SUBMIT, RE-ASSERT WHEN TARGET, "
+        "METHOD-STEP TOKEN MISMATCH) — use `preload_visible_ids`, "
+        "`submit_methods`, and `cross_page_nav_methods` to self-check "
+        "before emitting each binding.\n\n"
         + json.dumps(payload, separators=(",", ":"))
     )

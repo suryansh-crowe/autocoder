@@ -28,6 +28,7 @@ _VALID_ACTIONS = {
     "wait",
     "expect_visible",
     "expect_text",
+    "press_enter",
 }
 _FILL_LIKE = {"fill", "select"}
 

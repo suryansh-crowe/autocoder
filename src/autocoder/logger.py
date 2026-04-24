@@ -42,6 +42,7 @@ from typing import Any, TextIO
 from urllib.parse import urlsplit, urlunsplit
 
 from rich.console import Console
+from rich.markup import escape as _rich_escape
 
 
 _LEVELS: dict[str, int] = {"debug": 0, "info": 1, "ok": 1, "warn": 2, "error": 3}
@@ -135,6 +136,14 @@ def _emit(level: str, event: str, **fields: Any) -> None:
             # File logging must never crash the orchestrator.
             pass
     pretty = " ".join(f"{k}={v}" for k, v in fields.items())
+    # Rich interprets ``[...]`` as markup. Any field value containing
+    # square brackets (e.g., a URL regex like ``re.compile(r'/dq(?:[/?#]|$)')``
+    # or a log field from the autoheal trace) can collide with that
+    # grammar and crash ``Console.print``. We escape the dynamic
+    # ``event`` and ``pretty`` strings while keeping the intentional
+    # ``[{style}]...[/]`` wrapping for the level tag.
+    safe_event = _rich_escape(event)
+    safe_pretty = _rich_escape(pretty)
     style = {
         "info": "cyan",
         "warn": "yellow",
@@ -142,7 +151,9 @@ def _emit(level: str, event: str, **fields: Any) -> None:
         "ok": "green",
         "debug": "dim",
     }.get(level, "white")
-    _console_or_default().print(f"[{style}]{level:>5}[/] {event} {pretty}")
+    _console_or_default().print(
+        f"[{style}]{level:>5}[/] {safe_event} {safe_pretty}"
+    )
 
 
 # ---------------------------------------------------------------------------

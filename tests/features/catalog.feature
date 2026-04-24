@@ -1,37 +1,56 @@
-Feature: Catalog page core interactions
-  Tests search, navigation, and action buttons on the Catalog page.
+Feature: Catalog page search, filter, pagination, and navigation
+  Validates asset search, filter panel opening, pagination navigation, and cross-page navigation to Home and Stewie Assistant.
 
   Background:
-    Given User is on the Catalog page
+    Given The user is on the Catalog page
 
   @smoke
-  Scenario: User searches for an asset and sees results indicator
-    Given User enters a valid asset name in the search box
-    When User clicks the Filter button
-    Then Pagination controls are displayed
+  Scenario: Searching 'DQ-AGT-001' returns matching asset row
+    When The user enters 'DQ-AGT-001' in the asset search box
+    And The user submits the asset search
+    Then The first results row contains 'DQ-AGT-001'
 
   @regression @validation
-  Scenario: User submits an empty search and sees unfiltered pagination
-    Given User leaves the search box empty
-    When User clicks the Filter button
-    Then Pagination controls remain unchanged
+  Scenario: Searching 'zzzz_nonexistent_asset' shows empty-state message
+    When The user enters 'zzzz_nonexistent_asset' in the asset search box
+    And The user submits the asset search
+    Then The results area shows 'No matching assets'
+
+  @regression @validation
+  Scenario: Submitting empty asset search keeps result count unchanged
+    When The user clears the asset search box
+    And The user submits the asset search
+    Then The results row count remains the same as before search
 
   @smoke
-  Scenario: User navigates to Home and sees the Catalog heading
-    When User clicks the Home button
-    Then The Catalog heading is visible
+  Scenario: Clicking the Filter button opens the filter panel
+    When The user clicks the Filter button
+    Then The filter panel becomes visible
 
   @smoke
-  Scenario: User closes the sidebar and sees the Catalog heading
-    When User clicks the Close sidebar button
-    Then The Catalog heading is visible
+  Scenario: Clicking Next advances to page 2 and shows a different first row
+    When The user clicks the Next pagination button
+    Then The pagination indicator reads 'Page 2'
 
   @smoke
-  Scenario: User clicks Ask Stewie and sees the assistant panel
-    When User clicks the Ask Stewie button
-    Then The Stewie assistant panel is displayed
+  Scenario: Clicking Previous returns to page 1 and restores the first row
+    When The user clicks the Next pagination button
+    And The user clicks the Previous pagination button
+    Then The pagination indicator reads 'Page 1'
 
-  @smoke
-  Scenario: User clicks Data Quality and sees the Catalog heading
-    When User clicks the Data Quality button
-    Then The Catalog heading is visible
+  @regression @edge
+  Scenario: Clicking page 192 disables the Next pagination button
+    When The user clicks pagination page 192
+    Then The Next pagination button becomes disabled
+
+  @regression @navigation
+  Scenario: Clicking Home navigates to the Home page and displays Stewie Terminal landmark
+    When The user clicks the Home button
+    Then The URL contains '/home'
+    And The Home page landmark is visible
+
+  @regression @navigation
+  Scenario: Clicking Ask Stewie navigates to Stewie Assistant and shows the assistant landmark
+    When The user clicks the Ask Stewie button
+    Then The URL contains '/stewie'
+    And The Stewie Assistant landmark is visible

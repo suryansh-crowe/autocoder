@@ -65,20 +65,15 @@ from pathlib import Path
 
 import pytest
 
-
-def _flag(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name, "").strip().lower()
-    if not raw:
-        return default
-    return raw in {"1", "true", "yes", "on"}
+from tests import settings
 
 
 def _enabled() -> bool:
-    return _flag("AUTOCODER_AUTOHEAL")
+    return settings.AUTOCODER_AUTOHEAL
 
 
 def _rerun_enabled() -> bool:
-    return _flag("AUTOCODER_AUTOHEAL_RERUN")
+    return settings.AUTOCODER_AUTOHEAL_RERUN
 
 
 # (nodeid, classname, name, longrepr_text)

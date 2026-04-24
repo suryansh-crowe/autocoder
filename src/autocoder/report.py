@@ -25,10 +25,52 @@ from pathlib import Path
 
 from autocoder import logger
 from autocoder.config import Settings, ensure_dirs
-from autocoder.heal.pytest_failures import run_pytest_capture
+from autocoder.heal.pytest_failures import classify, run_pytest_capture
 from autocoder.llm.prompts import build_ui_inventory
 from autocoder.models import PageExtraction
 from autocoder.registry.store import RegistryStore
+
+
+# ---------------------------------------------------------------------------
+# Failure categorisation: frontend (product bug) vs script (test bug)
+# vs environment (flake / infra).
+# ---------------------------------------------------------------------------
+
+
+_FRONTEND_CLASSES = {"disabled", "intercepted", "wrong_kind", "not_visible"}
+_SCRIPT_CLASSES = {"locator_not_found", "not_attached"}
+_ENVIRONMENT_CLASSES = {"timeout"}
+_PYTHON_ERROR_TOKENS = (
+    "ImportError", "SyntaxError", "NameError", "AttributeError",
+    "TypeError", "ModuleNotFoundError", "KeyError", "IndentationError",
+)
+
+
+def categorise(failure_class: str, error_message: str) -> str:
+    """Bucket a failure into one of ``frontend | script | environment | other``.
+
+    * **frontend** — the UI behaved differently than the scenario expected
+      (button stuck disabled, modal intercepted the click, `.fill()` hit a
+      checkbox). Owned by the app team; a real product regression.
+    * **script** — the test code is wrong: bad selector, stale POM, Python
+      error raised during import/collection. Owned by the autocoder/heal
+      layers; rerun ``autocoder heal --from-pytest`` and the fix usually
+      follows automatically.
+    * **environment** — opaque timeout, network flake, expired session.
+      Neither party is clearly at fault; flag for review and retry.
+    * **other** — everything else, including plain AssertionError without
+      a recognised failure token.
+    """
+    msg = error_message or ""
+    if any(tok in msg for tok in _PYTHON_ERROR_TOKENS):
+        return "script"
+    if failure_class in _FRONTEND_CLASSES:
+        return "frontend"
+    if failure_class in _SCRIPT_CLASSES:
+        return "script"
+    if failure_class in _ENVIRONMENT_CLASSES:
+        return "environment"
+    return "other"
 
 
 @dataclass
@@ -38,6 +80,8 @@ class ScenarioRow:
     tiers: list[str]
     passed: bool | None = None
     error: str = ""
+    failure_class: str = ""
+    category: str = ""
 
 
 @dataclass
@@ -58,6 +102,11 @@ class ReportData:
     total_passed: int
     total_failed: int
     total_unknown: int
+    # Failure breakdown by ownership — summed across all slugs.
+    total_frontend: int = 0
+    total_script: int = 0
+    total_environment: int = 0
+    total_other_fail: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -126,15 +175,20 @@ def _norm_title(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
 
 
-def _parse_junit(path: Path) -> dict[str, tuple[bool, str]]:
-    """Return ``{normalised_scenario_title: (passed, error_text)}``."""
+def _parse_junit(path: Path) -> dict[str, tuple[bool, str, str]]:
+    """Return ``{normalised_scenario_title: (passed, error_text, failure_class)}``.
+
+    ``failure_class`` is the heuristic bucket from
+    :func:`autocoder.heal.pytest_failures.classify` (timeout, disabled,
+    intercepted, wrong_kind, …). Empty string when the test passed.
+    """
     if not path.exists():
         return {}
     try:
         tree = ET.parse(path)
     except ET.ParseError:
         return {}
-    out: dict[str, tuple[bool, str]] = {}
+    out: dict[str, tuple[bool, str, str]] = {}
     for case in tree.iter("testcase"):
         name = case.attrib.get("name", "")
         title_norm = _norm_title(_scenario_title_from_testcase(name))
@@ -142,12 +196,15 @@ def _parse_junit(path: Path) -> dict[str, tuple[bool, str]]:
         if failure is None:
             failure = case.find("error")
         if failure is None:
-            out[title_norm] = (True, "")
+            out[title_norm] = (True, "", "")
         else:
             msg = (failure.attrib.get("message") or "").strip()
             body = (failure.text or "").strip()
             first = (msg or body).splitlines()[0] if (msg or body) else ""
-            out[title_norm] = (False, first)
+            # Classify against the full traceback so e.g. "element is not
+            # enabled" at frame depth 3 still routes to "disabled".
+            fclass = classify(body or msg or first)
+            out[title_norm] = (False, first, fclass)
     return out
 
 
@@ -228,8 +285,9 @@ def build_report(settings: Settings, *, run_pytest: bool) -> ReportData:
         scenarios: list[ScenarioRow] = []
         for title, tiers in scenarios_raw:
             key = _norm_title(title)
-            passed = None
+            passed: bool | None = None
             error = ""
+            failure_class = ""
             if results:
                 # Direct hit, else best prefix / contains match.
                 hit = results.get(key)
@@ -239,7 +297,8 @@ def build_report(settings: Settings, *, run_pytest: bool) -> ReportData:
                             hit = rv
                             break
                 if hit is not None:
-                    passed, error = hit
+                    passed, error, failure_class = hit
+            category = categorise(failure_class, error) if passed is False else ""
             scenarios.append(
                 ScenarioRow(
                     slug=slug,
@@ -247,6 +306,8 @@ def build_report(settings: Settings, *, run_pytest: bool) -> ReportData:
                     tiers=tiers,
                     passed=passed,
                     error=error,
+                    failure_class=failure_class,
+                    category=category,
                 )
             )
             if passed is True:
@@ -268,12 +329,22 @@ def build_report(settings: Settings, *, run_pytest: bool) -> ReportData:
             )
         )
 
+    cat_counts: dict[str, int] = {}
+    for s in out:
+        for sc in s.scenarios:
+            if sc.passed is False and sc.category:
+                cat_counts[sc.category] = cat_counts.get(sc.category, 0) + 1
+
     return ReportData(
         slugs=out,
         total_scenarios=total_pass + total_fail + total_unknown,
         total_passed=total_pass,
         total_failed=total_fail,
         total_unknown=total_unknown,
+        total_frontend=cat_counts.get("frontend", 0),
+        total_script=cat_counts.get("script", 0),
+        total_environment=cat_counts.get("environment", 0),
+        total_other_fail=cat_counts.get("other", 0),
     )
 
 
@@ -354,6 +425,20 @@ tbody tr:hover { background: rgba(56, 189, 248, 0.05); }
 .badge-pass { background: rgba(34, 197, 94, 0.18); color: var(--pass); }
 .badge-fail { background: rgba(239, 68, 68, 0.18); color: var(--fail); }
 .badge-unknown { background: rgba(234, 179, 8, 0.18); color: var(--unknown); }
+.cat { display: inline-block; padding: 2px 8px; border-radius: 4px;
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.3px; }
+.cat-frontend     { background: rgba(244, 114, 182, 0.18); color: #f472b6;
+  border: 1px solid rgba(244, 114, 182, 0.35); }
+.cat-script       { background: rgba(56, 189, 248, 0.18); color: var(--accent);
+  border: 1px solid rgba(56, 189, 248, 0.35); }
+.cat-environment  { background: rgba(234, 179, 8, 0.18); color: var(--unknown);
+  border: 1px solid rgba(234, 179, 8, 0.35); }
+.cat-other        { background: rgba(148, 163, 184, 0.18); color: #cbd5e1;
+  border: 1px solid rgba(148, 163, 184, 0.35); }
+details > summary { cursor: pointer; padding: 8px 0; color: var(--fg);
+  font-size: 15px; font-weight: 600; }
+details[open] > summary { margin-bottom: 8px; }
 .tier { display: inline-block; background: rgba(148, 163, 184, 0.15);
   color: #cbd5e1; padding: 1px 8px; border-radius: 4px; font-size: 11px;
   margin-right: 4px; font-family: ui-monospace, monospace; }
@@ -363,6 +448,56 @@ tbody tr:hover { background: rgba(56, 189, 248, 0.05); }
 .url { color: var(--muted); font-family: ui-monospace, monospace;
   font-size: 12px; word-break: break-all; }
 """
+
+
+_CATEGORY_META = {
+    "frontend":    ("🎨 Frontend issues",    "App-side behaviour mismatch — owned by the product team."),
+    "script":      ("🛠 Script issues",      "Test code / codegen defect — rerun heal or regenerate."),
+    "environment": ("⚙️ Environment issues", "Opaque timeouts, network flakes, stale session — retry."),
+    "other":       ("❓ Other failures",     "Assertion or unknown failure shape."),
+}
+
+
+def _category_badge_html(category: str) -> str:
+    if not category:
+        return "<span class='muted'>-</span>"
+    label = category.capitalize()
+    return f"<span class='cat cat-{_html.escape(category)}'>{_html.escape(label)}</span>"
+
+
+def _render_failure_group_html(category: str, rows: list[tuple["SlugReport", ScenarioRow]]) -> str:
+    title, blurb = _CATEGORY_META.get(category, (category.capitalize(), ""))
+    if not rows:
+        return ""
+    trs: list[str] = []
+    for s, sc in rows:
+        tiers = "".join(
+            f"<span class='tier'>{_html.escape(t)}</span>" for t in sc.tiers
+        ) or "<span class='muted'>-</span>"
+        err = f"<div class='err'>{_html.escape(sc.error)}</div>" if sc.error else ""
+        bucket = (
+            f"<span class='tier'>{_html.escape(sc.failure_class)}</span>"
+            if sc.failure_class else "<span class='muted'>-</span>"
+        )
+        trs.append(
+            "<tr>"
+            f"<td>{_html.escape(s.slug)}</td>"
+            f"<td>{_html.escape(sc.title)}{err}</td>"
+            f"<td>{tiers}</td>"
+            f"<td>{bucket}</td>"
+            "</tr>"
+        )
+    open_attr = " open" if category in ("frontend", "script") else ""
+    return (
+        f"<details{open_attr}>"
+        f"<summary>{title} — {len(rows)} failure(s)</summary>"
+        f"<div class='muted' style='margin-bottom:8px'>{blurb}</div>"
+        "<table>"
+        "<thead><tr><th>Slug</th><th>Scenario</th><th>Tiers</th><th>Bucket</th></tr></thead>"
+        f"<tbody>{''.join(trs)}</tbody>"
+        "</table>"
+        "</details>"
+    )
 
 
 def render_html_report(data: ReportData) -> str:
@@ -376,6 +511,9 @@ def render_html_report(data: ReportData) -> str:
 
     coverage_rows: list[str] = []
     detail_rows: list[str] = []
+    # Collect failures by category for the grouped sections below.
+    by_category: dict[str, list[tuple["SlugReport", ScenarioRow]]] = {}
+
     for s in data.slugs:
         p = sum(1 for sc in s.scenarios if sc.passed is True)
         f = sum(1 for sc in s.scenarios if sc.passed is False)
@@ -396,6 +534,7 @@ def render_html_report(data: ReportData) -> str:
                 result = "<span class='badge badge-pass'>pass</span>"
             elif sc.passed is False:
                 result = "<span class='badge badge-fail'>fail</span>"
+                by_category.setdefault(sc.category or "other", []).append((s, sc))
             else:
                 result = "<span class='badge badge-unknown'>unknown</span>"
             tiers = "".join(
@@ -412,8 +551,16 @@ def render_html_report(data: ReportData) -> str:
                 f"<td>{_html.escape(sc.title)}{note}</td>"
                 f"<td>{tiers}</td>"
                 f"<td>{result}</td>"
+                f"<td>{_category_badge_html(sc.category)}</td>"
                 "</tr>"
             )
+
+    # Order: frontend (owned by app team) → script (owned by us) →
+    # environment (flakes) → other. Empty groups render nothing.
+    grouped_html = "".join(
+        _render_failure_group_html(cat, by_category.get(cat, []))
+        for cat in ("frontend", "script", "environment", "other")
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -436,6 +583,17 @@ def render_html_report(data: ReportData) -> str:
   <div class="card"><div class="k">Pass rate</div><div class="v">{pct}</div></div>
 </section>
 
+<h2>Failure ownership</h2>
+<div class="subtitle">Each failure is categorised so the right team gets the ticket.</div>
+<section class="cards">
+  <div class="card"><div class="k">Frontend</div><div class="v fail">{data.total_frontend}</div></div>
+  <div class="card"><div class="k">Script</div><div class="v fail">{data.total_script}</div></div>
+  <div class="card"><div class="k">Environment</div><div class="v unknown">{data.total_environment}</div></div>
+  <div class="card"><div class="k">Other</div><div class="v unknown">{data.total_other_fail}</div></div>
+</section>
+
+{grouped_html}
+
 <h2>Per-URL coverage</h2>
 <table>
   <thead><tr><th>URL</th><th>Detected UI components</th><th>Scenarios</th><th>Pass</th><th>Fail</th><th>Unknown</th></tr></thead>
@@ -446,7 +604,7 @@ def render_html_report(data: ReportData) -> str:
 
 <h2>Per-scenario results</h2>
 <table>
-  <thead><tr><th>Slug</th><th>Scenario</th><th>Tiers</th><th>Result</th></tr></thead>
+  <thead><tr><th>Slug</th><th>Scenario</th><th>Tiers</th><th>Result</th><th>Category</th></tr></thead>
   <tbody>
 {''.join(detail_rows)}
   </tbody>

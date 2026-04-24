@@ -32,6 +32,14 @@ _INTERACTIVE_SELECTOR = (
     "[contenteditable=true]"
 )
 
+# Headings are landmarks — generated Then-steps assert against their
+# text ("The 'DQ Failures' heading is visible"), so we expose each as
+# a separate Element with kind='heading'. The POM planner is told to
+# emit an expect_visible method per heading, which gives the feature-
+# plan + steps-plan LLMs something concrete to bind to.
+_HEADING_SELECTOR = "h1, h2, h3, h4, [role='heading']"
+_MAX_HEADING_ELEMENTS = 12
+
 
 def _kind_for(role: str | None, tag: str | None) -> str:
     """Map (role, tag) to the catalog `kind` used by the planner.
@@ -42,6 +50,8 @@ def _kind_for(role: str | None, tag: str | None) -> str:
     """
     role = (role or "").lower()
     tag = (tag or "").lower()
+    if role == "heading" or tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+        return "heading"
     if role == "checkbox":
         return "checkbox"
     if role == "radio":
@@ -133,6 +143,34 @@ def _enumerate_interactive(page: Page, max_elements: int) -> list[ElementHandle]
     return visible
 
 
+def _enumerate_headings(page: Page, max_elements: int) -> list[ElementHandle]:
+    """Visible, non-empty, text-deduped heading handles.
+
+    Dedupes on visible text so a heading that appears in a wrapped
+    role=heading inside an h2 doesn't produce two identical entries.
+    """
+    try:
+        handles = page.query_selector_all(_HEADING_SELECTOR)
+    except Exception:
+        return []
+    seen: set[str] = set()
+    out: list[ElementHandle] = []
+    for h in handles:
+        try:
+            if not h.is_visible():
+                continue
+            text = _short(h.text_content(), 80)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+        except Exception:
+            continue
+        out.append(h)
+        if len(out) >= max_elements:
+            break
+    return out
+
+
 def extract_page(
     page: Page,
     *,
@@ -197,6 +235,79 @@ def extract_page(
             element_lookup[sig] = eid
         except Exception:
             pass
+
+    # Pass 2: headings. We enumerate these separately from the
+    # interactive pass (which is capped by max_elements_per_page) so
+    # landmark text is always available to the planner even on dense
+    # pages. Each heading becomes an Element with kind='heading' that
+    # the POM planner turns into an expect_*_visible method.
+    heading_handles = _enumerate_headings(page, _MAX_HEADING_ELEMENTS)
+    for handle in heading_handles:
+        try:
+            primary, fallbacks = build_selector(handle)
+        except Exception as exc:  # noqa: BLE001
+            skipped += 1
+            logger.debug("inspector_skip_heading", err=str(exc)[:80])
+            continue
+
+        # The heading's visible text is the accessible name; prefix
+        # the id with ``heading_`` so the POM method reads as
+        # expect_heading_<slug>_visible downstream.
+        heading_text = primary.name or _short(handle.text_content(), 80) or ""
+        seed = "heading_" + (heading_text or f"h_{len(elements) + 1}")
+        eid = _element_id(seed, used_ids)
+
+        try:
+            visible = handle.is_visible()
+        except Exception:
+            visible = True
+
+        element = Element(
+            id=eid,
+            role=primary.role or "heading",
+            name=_short(heading_text, 80),
+            kind="heading",
+            selector=primary,
+            fallbacks=fallbacks,
+            visible=visible,
+            enabled=True,
+        )
+        elements.append(element)
+
+    # Interactive expansion pass — click reveal-shaped buttons (Filter,
+    # Sort, More, aria-haspopup) one at a time and merge newly-visible
+    # elements into the catalog. Gated by ``EXTRACTION_INTERACTIVE``
+    # (default True). All failures are caught inside
+    # :func:`interactive_expand`, so a misfire here cannot fail
+    # extraction — the POM just ends up with the initial-scrape
+    # elements the same as if the pass were disabled.
+    if settings.extraction.interactive and elements:
+        try:
+            # Local import keeps the module loadable in environments
+            # where Playwright is absent but the inspector itself is
+            # used for shape testing.
+            from autocoder.extract.interactive import interactive_expand
+
+            revealed = interactive_expand(
+                page,
+                elements,
+                max_candidates=settings.extraction.interactive_max_candidates,
+            )
+            if revealed:
+                logger.ok(
+                    "inspector_interactive_merged",
+                    url=logger.safe_url(url),
+                    initial=len(elements),
+                    revealed=len(revealed),
+                )
+                elements.extend(revealed)
+        except Exception as exc:  # noqa: BLE001
+            logger.warn(
+                "inspector_interactive_failed",
+                url=logger.safe_url(url),
+                err=str(exc)[:120],
+                hint="falling back to initial-scrape elements only",
+            )
 
     forms = _collect_forms(page, element_lookup)
     headings = _collect_headings(page)

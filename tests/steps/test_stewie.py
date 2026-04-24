@@ -1,4 +1,4 @@
-"""Generated step definitions for 'Stewie AI main page interaction'."""
+"""Generated step definitions for 'Stewie AI chat prompt submission, role selection, and cross-page navigation'."""
 
 from __future__ import annotations
 
@@ -18,71 +18,56 @@ def stewie_page(page: Page) -> StewiePage:
     return StewiePage(page)
 
 
-@given(parsers.parse('User is on the Stewie AI main page'))
-def _user_is_on_the_stewie_ai_main_page(stewie_page: StewiePage) -> None:
+@given(parsers.parse('The user is on the Stewie AI page'))
+def _the_user_is_on_the_stewie_ai_page(stewie_page: StewiePage) -> None:
     stewie_page.navigate()
 
 
-@given(parsers.parse('User enters a prompt in the Ask Stewie message box'))
-def _user_enters_a_prompt_in_the_ask_stewie_message_box(stewie_page: StewiePage) -> None:
-    stewie_page.fill_ask_stewie_type_for_asset_suggestions('example prompt')
+@when(parsers.parse("The user enters 'List all assets within Finance domain.' in the chat prompt textbox"))
+def _the_user_enters_list_all_assets_within_finance_dom(stewie_page: StewiePage) -> None:
+    stewie_page.fill_ask_stewie_type_for_asset_suggestions('List all assets within Finance domain.')
 
 
-@when(parsers.parse('User clicks the Send button'))
-def _user_clicks_the_send_button(stewie_page: StewiePage) -> None:
+@when(parsers.parse('The user clicks the Send button'))
+def _the_user_clicks_the_send_button(stewie_page: StewiePage) -> None:
     stewie_page.click_send()
 
 
-@then(parsers.parse('The Conversations panel is displayed'))
-def _the_conversations_panel_is_displayed(stewie_page: StewiePage) -> None:
-    expect(stewie_page.locate('new_conversation')).to_be_visible()
+@then(parsers.parse('A new conversation thread appears'))
+def _a_new_conversation_thread_appears(stewie_page: StewiePage) -> None:
+    raise NotImplementedError('Implement step: A new conversation thread appears')
 
 
-@when(parsers.parse('User clicks the Data Catalog button'))
-def _user_clicks_the_data_catalog_button(stewie_page: StewiePage) -> None:
-    stewie_page.click_data_catalog()
+@when(parsers.parse('The user clears the chat prompt textbox'))
+def _the_user_clears_the_chat_prompt_textbox(stewie_page: StewiePage) -> None:
+    stewie_page.locate('ask_stewie_type_for_asset_suggestions').fill('')
 
 
-@then(parsers.parse('The Data Catalog section is visible'))
-def _the_data_catalog_section_is_visible(stewie_page: StewiePage) -> None:
-    expect(stewie_page.locate('data_quality')).to_be_visible()
+@then(parsers.parse('The Send button becomes disabled'))
+def _the_send_button_becomes_disabled(stewie_page: StewiePage) -> None:
+    expect(stewie_page.locate('send')).to_be_disabled()
 
 
-@when(parsers.parse('User clicks the Ask Stewie button'))
-def _user_clicks_the_ask_stewie_button(stewie_page: StewiePage) -> None:
-    stewie_page.click_ask_stewie()
+@when(parsers.parse("The user selects 'Data Analyst' from the Choose role dropdown"))
+def _the_user_selects_data_analyst_from_the_choose_role(stewie_page: StewiePage) -> None:
+    stewie_page.select_choose_role('Data Analyst')
 
 
-@then(parsers.parse('The Ask Stewie message box is visible'))
-def _the_ask_stewie_message_box_is_visible(stewie_page: StewiePage) -> None:
-    expect(stewie_page.locate('ask_stewie_type_for_asset_suggestions')).to_be_visible()
+@then(parsers.parse('The chat prompt textbox becomes enabled'))
+def _the_chat_prompt_textbox_becomes_enabled(stewie_page: StewiePage) -> None:
+    expect(stewie_page.locate('ask_stewie_type_for_asset_suggestions')).to_be_enabled()
 
 
-@when(parsers.parse('User selects a role from the Choose role dropdown'))
-def _user_selects_a_role_from_the_choose_role_dropdown(stewie_page: StewiePage) -> None:
-    stewie_page.select_choose_role('value')
+@when(parsers.parse('The user clicks the Home button'))
+def _the_user_clicks_the_home_button(stewie_page: StewiePage) -> None:
+    stewie_page.click_home()
 
 
-@then(parsers.parse('The Send button is enabled'))
-def _the_send_button_is_enabled(stewie_page: StewiePage) -> None:
-    expect(stewie_page.locate('send')).to_be_enabled()
+@then(parsers.parse("The URL contains '/home'"))
+def _the_url_contains_home(stewie_page: StewiePage) -> None:
+    expect(stewie_page.page).to_have_url(re.compile('/home(?:[/?#]|$)'))
 
 
-@when(parsers.parse('User clicks the Send button without selecting a role'))
-def _user_clicks_the_send_button_without_selecting_a_ro(stewie_page: StewiePage) -> None:
-    stewie_page.click_send()
-
-
-@then(parsers.parse('A validation message is displayed for role selection'))
-def _a_validation_message_is_displayed_for_role_selecti(stewie_page: StewiePage) -> None:
-    expect(stewie_page.locate('choose_role')).to_be_visible()
-
-
-@when(parsers.parse('User clicks the Notifications button'))
-def _user_clicks_the_notifications_button(stewie_page: StewiePage) -> None:
-    stewie_page.click_notifications()
-
-
-@then(parsers.parse('The Notifications panel is visible'))
-def _the_notifications_panel_is_visible(stewie_page: StewiePage) -> None:
-    pass
+@then(parsers.parse("The 'Stewie Terminal' heading is displayed"))
+def _the_stewie_terminal_heading_is_displayed(stewie_page: StewiePage) -> None:
+    expect(stewie_page.page.get_by_role('heading', name='Stewie Terminal')).to_be_visible()

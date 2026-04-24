@@ -10,12 +10,17 @@ from __future__ import annotations
 
 from playwright.sync_api import Page, expect
 
+from tests import settings
 from tests.pages.base_page import BasePage
 from tests.support.locator_strategy import SelectorSpec
 
 
 class StewiePage(BasePage):
-    URL = "https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/stewie"
+    # Path component only — the absolute URL is built at runtime from
+    # ``settings.BASE_URL`` so the same POM targets dev / staging / prod
+    # without regeneration. The extraction URL captured at generation
+    # time was: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/stewie
+    PATH = "/stewie"
     SELECTORS: dict[str, list[SelectorSpec]] = {
         'home': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Home'}, {'strategy': 'label', 'value': 'Home', 'role': 'button', 'name': 'Home'}, {'strategy': 'text', 'value': 'Home', 'role': 'button'}],
         'ask_stewie': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Ask Stewie'}, {'strategy': 'label', 'value': 'Ask Stewie', 'role': 'button', 'name': 'Ask Stewie'}, {'strategy': 'text', 'value': 'Ask Stewie', 'role': 'button'}],
@@ -34,21 +39,21 @@ class StewiePage(BasePage):
         'search': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Search'}, {'strategy': 'label', 'value': 'Search', 'role': 'button', 'name': 'Search'}, {'strategy': 'text', 'value': 'Search', 'role': 'button'}],
         'list_all_the_finance_domain_assets': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'List all the finance domain assets'}, {'strategy': 'text', 'value': 'List all the finance domain assets', 'role': 'button'}],
         'html_1_body_1_div_1_div_2_div_2_div_1_div_1_div_1_div_2_div_2_div_2_div_2_button_2': [{'strategy': 'xpath', 'value': '/html[1]/body[1]/div[1]/div[2]/div[2]/div[1]/div[1]/div[1]/div[2]/div[2]/div[2]/div[2]/button[2]', 'role': 'button'}],
-        'list_all_the_financial_assets': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'List all the financial assets'}, {'strategy': 'text', 'value': 'List all the financial assets', 'role': 'button'}],
+        'list_all_the_finance_domain_assets_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'List all the finance domain assets'}, {'strategy': 'text', 'value': 'List all the finance domain assets', 'role': 'button'}],
         'html_1_body_1_div_1_div_2_div_2_div_1_div_1_div_1_div_2_div_2_div_3_div_2_button_2': [{'strategy': 'xpath', 'value': '/html[1]/body[1]/div[1]/div[2]/div[2]/div[1]/div[1]/div[1]/div[2]/div[2]/div[3]/div[2]/button[2]', 'role': 'button'}],
-        'list_all_the_financial_assets_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'List all the financial assets'}, {'strategy': 'text', 'value': 'List all the financial assets', 'role': 'button'}],
+        'list_all_the_financial_assets': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'List all the financial assets'}, {'strategy': 'text', 'value': 'List all the financial assets', 'role': 'button'}],
         'html_1_body_1_div_1_div_2_div_2_div_1_div_1_div_1_div_2_div_2_div_3_div_3_button_2': [{'strategy': 'xpath', 'value': '/html[1]/body[1]/div[1]/div[2]/div[2]/div[1]/div[1]/div[1]/div[2]/div[2]/div[3]/div[3]/button[2]', 'role': 'button'}],
-        'list_all_the_financial_assets_3': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'List all the financial assets'}, {'strategy': 'text', 'value': 'List all the financial assets', 'role': 'button'}],
+        'list_all_the_financial_assets_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'List all the financial assets'}, {'strategy': 'text', 'value': 'List all the financial assets', 'role': 'button'}],
         'html_1_body_1_div_1_div_2_div_2_div_1_div_1_div_1_div_2_div_2_div_3_div_4_button_2': [{'strategy': 'xpath', 'value': '/html[1]/body[1]/div[1]/div[2]/div[2]/div[1]/div[1]/div[1]/div[2]/div[2]/div[3]/div[4]/button[2]', 'role': 'button'}],
-        'list_all_the_financial_assets_4': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'List all the financial assets'}, {'strategy': 'text', 'value': 'List all the financial assets', 'role': 'button'}],
+        'list_all_the_financial_assets_3': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'List all the financial assets'}, {'strategy': 'text', 'value': 'List all the financial assets', 'role': 'button'}],
         'html_1_body_1_div_1_div_2_div_2_div_1_div_1_div_1_div_2_div_2_div_3_div_5_button_2': [{'strategy': 'xpath', 'value': '/html[1]/body[1]/div[1]/div[2]/div[2]/div[1]/div[1]/div[1]/div[2]/div[2]/div[3]/div[5]/button[2]', 'role': 'button'}],
-        'list_of_all_assets_within_finance_domain': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'List of all assets within Finance domain'}, {'strategy': 'text', 'value': 'List of all assets within Finance domain', 'role': 'button'}],
+        'list_all_the_financial_assets_4': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'List all the financial assets'}, {'strategy': 'text', 'value': 'List all the financial assets', 'role': 'button'}],
         'html_1_body_1_div_1_div_2_div_2_div_1_div_1_div_1_div_2_div_2_div_3_div_6_button_2': [{'strategy': 'xpath', 'value': '/html[1]/body[1]/div[1]/div[2]/div[2]/div[1]/div[1]/div[1]/div[2]/div[2]/div[3]/div[6]/button[2]', 'role': 'button'}],
-        'who_is_the_data_owner_and_data_steward_for_account_type_table': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'who is the data owner and data steward for @ACCOUNT_TYPE Table'}, {'strategy': 'text', 'value': 'who is the data owner and data steward for @ACCOUNT_TYPE Table', 'role': 'button'}],
+        'list_of_all_assets_within_finance_domain': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'List of all assets within Finance domain'}, {'strategy': 'text', 'value': 'List of all assets within Finance domain', 'role': 'button'}],
         'html_1_body_1_div_1_div_2_div_2_div_1_div_1_div_1_div_2_div_2_div_3_div_7_button_2': [{'strategy': 'xpath', 'value': '/html[1]/body[1]/div[1]/div[2]/div[2]/div[1]/div[1]/div[1]/div[2]/div[2]/div[3]/div[7]/button[2]', 'role': 'button'}],
-        'avishi_raj_crowe_com': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Avishi.Raj@crowe.com'}, {'strategy': 'text', 'value': 'Avishi.Raj@crowe.com', 'role': 'button'}],
+        'who_is_the_data_owner_and_data_steward_for_account_type_table': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'who is the data owner and data steward for @ACCOUNT_TYPE Table'}, {'strategy': 'text', 'value': 'who is the data owner and data steward for @ACCOUNT_TYPE Table', 'role': 'button'}],
         'html_1_body_1_div_1_div_2_div_2_div_1_div_1_div_1_div_2_div_2_div_3_div_8_button_2': [{'strategy': 'xpath', 'value': '/html[1]/body[1]/div[1]/div[2]/div[2]/div[1]/div[1]/div[1]/div[2]/div[2]/div[3]/div[8]/button[2]', 'role': 'button'}],
-        'avishi_raj_crowe_com_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Avishi.Raj@crowe.com'}, {'strategy': 'text', 'value': 'Avishi.Raj@crowe.com', 'role': 'button'}],
+        'avishi_raj_crowe_com': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Avishi.Raj@crowe.com'}, {'strategy': 'text', 'value': 'Avishi.Raj@crowe.com', 'role': 'button'}],
         'html_1_body_1_div_1_div_2_div_2_div_1_div_1_div_1_div_2_div_2_div_3_div_9_button_2': [{'strategy': 'xpath', 'value': '/html[1]/body[1]/div[1]/div[2]/div[2]/div[1]/div[1]/div[1]/div[2]/div[2]/div[3]/div[9]/button[2]', 'role': 'button'}],
         'load_more': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Load more...'}, {'strategy': 'text', 'value': 'Load more...', 'role': 'button'}],
         'which_tables_contain_pii_data': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': '• Which tables contain PII data?'}, {'strategy': 'text', 'value': '• Which tables contain PII data?', 'role': 'button'}],
@@ -63,10 +68,44 @@ class StewiePage(BasePage):
         'ask_stewie_type_for_asset_suggestions': [{'strategy': 'placeholder', 'value': 'Ask Stewie... (Type @ for asset suggestions)', 'role': 'textbox'}],
         'choose_role': [{'strategy': 'role_name', 'value': 'combobox', 'role': 'combobox', 'name': 'Choose role'}, {'strategy': 'label', 'value': 'Choose role', 'role': 'combobox', 'name': 'Choose role'}],
         'send': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Send'}, {'strategy': 'label', 'value': 'Send', 'role': 'button', 'name': 'Send'}, {'strategy': 'text', 'value': 'Send', 'role': 'button'}],
+        'heading_conversations': [{'strategy': 'role_name', 'value': 'heading', 'role': 'heading', 'name': 'Conversations'}, {'strategy': 'text', 'value': 'Conversations', 'role': 'heading'}],
+        'heading_good_morning_avishi': [{'strategy': 'role_name', 'value': 'heading', 'role': 'heading', 'name': 'Good morning, Avishi'}, {'strategy': 'text', 'value': 'Good morning, Avishi', 'role': 'heading'}],
+        'home_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Home'}, {'strategy': 'label', 'value': 'Home', 'role': 'button', 'name': 'Home'}, {'strategy': 'text', 'value': 'Home', 'role': 'button'}],
+        'notifications_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Notifications'}, {'strategy': 'label', 'value': 'Notifications', 'role': 'button', 'name': 'Notifications'}, {'strategy': 'text', 'value': 'Notifications', 'role': 'button'}],
+        'logout_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Logout'}, {'strategy': 'label', 'value': 'Logout', 'role': 'button', 'name': 'Logout'}, {'strategy': 'text', 'value': 'Logout', 'role': 'button'}],
+        'show_less': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Show less'}, {'strategy': 'text', 'value': 'Show less', 'role': 'button'}],
+        'home_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Home'}, {'strategy': 'label', 'value': 'Home', 'role': 'button', 'name': 'Home'}, {'strategy': 'text', 'value': 'Home', 'role': 'button'}],
+        'notifications_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Notifications'}, {'strategy': 'label', 'value': 'Notifications', 'role': 'button', 'name': 'Notifications'}, {'strategy': 'text', 'value': 'Notifications', 'role': 'button'}],
+        'logout_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Logout'}, {'strategy': 'label', 'value': 'Logout', 'role': 'button', 'name': 'Logout'}, {'strategy': 'text', 'value': 'Logout', 'role': 'button'}],
+        'show_less_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Show less'}, {'strategy': 'text', 'value': 'Show less', 'role': 'button'}],
+        'home_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Home'}, {'strategy': 'label', 'value': 'Home', 'role': 'button', 'name': 'Home'}, {'strategy': 'text', 'value': 'Home', 'role': 'button'}],
+        'notifications_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Notifications'}, {'strategy': 'label', 'value': 'Notifications', 'role': 'button', 'name': 'Notifications'}, {'strategy': 'text', 'value': 'Notifications', 'role': 'button'}],
+        'logout_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Logout'}, {'strategy': 'label', 'value': 'Logout', 'role': 'button', 'name': 'Logout'}, {'strategy': 'text', 'value': 'Logout', 'role': 'button'}],
+        'show_less_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Show less'}, {'strategy': 'text', 'value': 'Show less', 'role': 'button'}],
+        'home_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Home'}, {'strategy': 'label', 'value': 'Home', 'role': 'button', 'name': 'Home'}, {'strategy': 'text', 'value': 'Home', 'role': 'button'}],
+        'notifications_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Notifications'}, {'strategy': 'label', 'value': 'Notifications', 'role': 'button', 'name': 'Notifications'}, {'strategy': 'text', 'value': 'Notifications', 'role': 'button'}],
+        'logout_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Logout'}, {'strategy': 'label', 'value': 'Logout', 'role': 'button', 'name': 'Logout'}, {'strategy': 'text', 'value': 'Logout', 'role': 'button'}],
+        'show_less_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Show less'}, {'strategy': 'text', 'value': 'Show less', 'role': 'button'}],
     }
 
     def __init__(self, page: Page) -> None:
         super().__init__(page, self.SELECTORS)
+
+    @property
+    def URL(self) -> str:
+        """Absolute URL for this page, joined against ``settings.BASE_URL``.
+
+        Raises if ``BASE_URL`` is empty so a missing ``.env`` entry
+        fails loudly instead of silently hitting ``about:blank`` or
+        whatever Playwright does with a bare path.
+        """
+        base = (settings.BASE_URL or "").rstrip("/")
+        if not base:
+            raise RuntimeError(
+                "BASE_URL is not set in .env — add it so tests target "
+                "your environment (dev / staging / prod)."
+            )
+        return base + self.PATH
 
     def navigate(self) -> None:
         # ``domcontentloaded`` matches the extraction-time wait ladder
@@ -75,81 +114,161 @@ class StewiePage(BasePage):
         self.page.goto(self.URL, wait_until="domcontentloaded")
 
     def click_home(self) -> None:
-        """Navigate to home"""
+        """navigate to home dashboard"""
         self.click('home')
 
     def click_ask_stewie(self) -> None:
-        """Open Ask Stewie"""
+        """open Stewie AI chat"""
         self.click('ask_stewie')
 
     def click_data_catalog(self) -> None:
-        """Open Data Catalog"""
+        """open data catalog section"""
         self.click('data_catalog')
 
     def click_source_connection(self) -> None:
-        """Open Source Connection"""
+        """open source connection section"""
         self.click('source_connection')
 
     def click_data_quality(self) -> None:
-        """Open Data Quality"""
+        """open data quality section"""
         self.click('data_quality')
 
     def click_agent_pipelines(self) -> None:
-        """Open Agent Pipelines"""
+        """open agent pipelines section"""
         self.click('agent_pipelines')
 
     def click_agent_management(self) -> None:
-        """Open Agent Management"""
+        """open agent management section"""
         self.click('agent_management')
 
     def click_security(self) -> None:
-        """Open Security"""
+        """open security section"""
         self.click('security')
 
     def click_notifications(self) -> None:
-        """Open Notifications"""
+        """open notifications panel"""
         self.click('notifications')
 
     def click_logout(self) -> None:
-        """Logout user"""
+        """log out of Stewie AI"""
         self.click('logout')
 
+    def click_close_sidebar(self) -> None:
+        """close sidebar navigation"""
+        self.click('close_sidebar')
+
     def click_new_conversation(self) -> None:
-        """Start new conversation"""
+        """start a new conversation"""
         self.click('new_conversation')
 
+    def click_all(self) -> None:
+        """show all conversations"""
+        self.click('all')
+
+    def click_pinned(self) -> None:
+        """show pinned conversations"""
+        self.click('pinned')
+
+    def click_search(self) -> None:
+        """open search panel"""
+        self.click('search')
+
+    def click_list_all_the_finance_domain_assets(self) -> None:
+        """list all finance domain assets"""
+        self.click('list_all_the_finance_domain_assets')
+
+    def click_list_all_the_finance_domain_assets_2(self) -> None:
+        """list all finance domain assets"""
+        self.click('list_all_the_finance_domain_assets_2')
+
+    def click_list_all_the_financial_assets(self) -> None:
+        """list all financial assets"""
+        self.click('list_all_the_financial_assets')
+
+    def click_list_all_the_financial_assets_2(self) -> None:
+        """list all financial assets"""
+        self.click('list_all_the_financial_assets_2')
+
+    def click_list_all_the_financial_assets_3(self) -> None:
+        """list all financial assets"""
+        self.click('list_all_the_financial_assets_3')
+
+    def click_list_all_the_financial_assets_4(self) -> None:
+        """list all financial assets"""
+        self.click('list_all_the_financial_assets_4')
+
+    def click_list_of_all_assets_within_finance_domain(self) -> None:
+        """list all assets within finance domain"""
+        self.click('list_of_all_assets_within_finance_domain')
+
+    def click_who_is_the_data_owner_and_data_steward_for_account_type_table(self) -> None:
+        """show data owner and steward for ACCOUNT_TYPE table"""
+        self.click('who_is_the_data_owner_and_data_steward_for_account_type_table')
+
+    def click_avishi_raj_crowe_com(self) -> None:
+        """open Avishi Raj conversation"""
+        self.click('avishi_raj_crowe_com')
+
+    def click_load_more(self) -> None:
+        """load more conversations"""
+        self.click('load_more')
+
+    def click_which_tables_contain_pii_data(self) -> None:
+        """show tables containing PII data"""
+        self.click('which_tables_contain_pii_data')
+
+    def click_show_me_data_quality_results_for_customer_table(self) -> None:
+        """show data quality results for Customer table"""
+        self.click('show_me_data_quality_results_for_customer_table')
+
+    def click_list_all_assets_within_finance_domain(self) -> None:
+        """list all assets within finance domain"""
+        self.click('list_all_assets_within_finance_domain')
+
+    def click_tell_me_tables_with_ach_transaction_details(self) -> None:
+        """show tables with ACH transaction details"""
+        self.click('tell_me_tables_with_ach_transaction_details')
+
+    def click_tell_me_what_values_do_we_have_for_customer_type(self) -> None:
+        """show values for Customer Type"""
+        self.click('tell_me_what_values_do_we_have_for_customer_type')
+
+    def click_list_datasets_that_reference_the_swift_code(self) -> None:
+        """list datasets referencing SWIFT code"""
+        self.click('list_datasets_that_reference_the_swift_code')
+
+    def click_which_datasets_am_i_responsible_for(self) -> None:
+        """show datasets user is responsible for"""
+        self.click('which_datasets_am_i_responsible_for')
+
+    def click_summarize_the_data_quality_status_of_tables_i_own(self) -> None:
+        """summarize data quality status of owned tables"""
+        self.click('summarize_the_data_quality_status_of_tables_i_own')
+
+    def click_show_me_datasets_i_need_to_update_classification_tag(self) -> None:
+        """show datasets needing classification tag update"""
+        self.click('show_me_datasets_i_need_to_update_classification_tag')
+
     def fill_ask_stewie_type_for_asset_suggestions(self, value: str) -> None:
-        """Fill Stewie question"""
+        """fill Stewie chat textbox"""
         self.fill('ask_stewie_type_for_asset_suggestions', value)
 
+    def submit_ask_stewie_type_for_asset_suggestions(self) -> None:
+        """submit Stewie chat via Enter key"""
+        self.locate('ask_stewie_type_for_asset_suggestions').press('Enter')
+
     def select_choose_role(self, value: str) -> None:
-        """Select user role"""
+        """select user role"""
         self.select('choose_role', value)
 
     def click_send(self) -> None:
-        """Send Stewie question"""
+        """send Stewie chat message"""
         self.click('send')
 
-    def click_close_sidebar(self) -> None:
-        """Close sidebar"""
-        self.click('close_sidebar')
+    def expect_heading_conversations(self) -> None:
+        """assert Conversations heading is visible"""
+        expect(self.locate('heading_conversations')).to_be_visible()
 
-    def click_search(self) -> None:
-        """Search assets"""
-        self.click('search')
-
-    def click_load_more(self) -> None:
-        """Load more results"""
-        self.click('load_more')
-
-    def click_list_all_the_finance_domain_assets(self) -> None:
-        """List finance domain assets"""
-        self.click('list_all_the_finance_domain_assets')
-
-    def click_list_of_all_assets_within_finance_domain(self) -> None:
-        """List all assets in finance domain"""
-        self.click('list_of_all_assets_within_finance_domain')
-
-    def click_show_me_data_quality_results_for_customer_table(self) -> None:
-        """Show data quality for customer table"""
-        self.click('show_me_data_quality_results_for_customer_table')
+    def expect_heading_good_morning_avishi(self) -> None:
+        """assert Good morning, Avishi heading is visible"""
+        expect(self.locate('heading_good_morning_avishi')).to_be_visible()

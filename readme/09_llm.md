@@ -1,8 +1,8 @@
 # 09 · LLM intake and call structure
 
-The LLM does one job: produce a small JSON action plan. Two calls per
-URL, both constrained, both validated. No Python code is ever written
-by the model.
+The LLM does one job: produce a small JSON action plan.
+**Three calls per URL**, all constrained, all validated.
+No Python code is ever written by the model.
 
 ## Model and runtime
 
@@ -284,54 +284,50 @@ success, `ollama_json_parse_failed` on total failure.
 
 ## Prompts
 
-There are four prompt families across the codebase. All return a
-single JSON object; all are short and contain no few-shot examples.
+Every prompt the agent sends to the LLM is **JSON-backed, not code-backed**.
+The five system prompts live as standalone files under
+`src/autocoder/prompts/` and are loaded at import time by
+`autocoder.prompts.load_system(name)`. The Python modules
+`autocoder/llm/prompts.py` and `autocoder/heal/prompts.py` publish
+the loaded strings under their traditional constant names
+(`POM_SYSTEM`, `FEATURE_SYSTEM`, `STEPS_SYSTEM`, `HEAL_SYSTEM`,
+`FAILURE_HEAL_SYSTEM`) so every call site keeps working unchanged.
 
-* `autocoder/llm/prompts.py:POM_SYSTEM` — POM-plan prompt (stage 4).
-* `autocoder/llm/prompts.py:FEATURE_SYSTEM` — feature-plan prompt
-  (stage 6).
-* `autocoder/heal/prompts.py:HEAL_SYSTEM` — fill a single
-  `NotImplementedError` stub (`autocoder heal`).
-* `autocoder/heal/prompts.py:FAILURE_HEAL_SYSTEM` — revise a step
-  body whose pytest run failed (`autocoder heal --from-pytest`).
-  The envelope carries the step text + current body + Playwright
-  error + a heuristic `failure_class` so the model can reason
-  about disabled buttons, modal interception, wrong-kind widgets,
-  and missing prerequisites.
+See `19_prompts.md` for the full walkthrough — shape of each JSON
+file, how to edit one, how to A/B a variant.
+
+The three **per-page** prompts:
+
+* `prompts/pom_plan.json` — stage 4, controls JSON → POM method plan.
+* `prompts/feature_plan.json` — stage 6, controls JSON + POM methods
+  + `known_pages` → per-control-type Gherkin scenarios.
+* `prompts/steps_plan.json` — stage 8 (NEW), feature plan + POM +
+  `known_pages` → a Playwright body per unique Gherkin step.
+
+The two **heal** prompts:
+
+* `prompts/heal_stub.json` — fill a single `NotImplementedError` stub
+  (`autocoder heal`).
+* `prompts/heal_failure.json` — revise a step body whose pytest run
+  failed. The envelope carries the step text + current body +
+  Playwright error + a heuristic `failure_class` so the model can
+  reason about disabled buttons, modal interception, wrong-kind
+  widgets, and missing prerequisites.
 
 Both heal prompts share the same validator
 (`autocoder/heal/validator.py`); the failure-heal path opts in to
 `max_statements=5` so a fix like
 `pom.locate('agreement').check(); pom.click_submit()` is allowed.
 
-### POM plan (stage 4)
+### Per-page user prompts (what the LLM sees)
 
-System prompt (~120 tokens) sets the output schema and rules:
+The *user* prompts are built by the `build_*_prompt` functions in
+`autocoder/llm/prompts.py`. They package the current page's
+extraction + plan metadata into a JSON envelope. None of these
+functions can leak secrets — they only read the element catalog,
+POM method names, and the `known_pages` snapshot.
 
-```
-You are a planner for a Playwright test generator.
-Output a single JSON object — no prose, no markdown.
-
-Schema:
-{
-  "class_name": "<CamelCase>Page",
-  "fixture_name": "<snake_case_page>",
-  "methods": [
-    {"name": "<snake_case>", "intent": "<<= 60 chars>",
-     "element_id": "<id from elements>",
-     "action": "click|fill|check|select|navigate|wait|expect_visible|expect_text",
-     "args": ["<arg names if action needs values>"]}
-  ]
-}
-
-Rules:
-- Use ONLY element ids that appear in the input list.
-- Choose `action` based on element kind: ...
-- 1 method per element you intend to expose. Skip purely decorative ones.
-- Keep total methods <= 20.
-```
-
-User prompt (~250-400 tokens) is a JSON envelope around the catalog:
+Example envelope for `build_pom_prompt`:
 
 ```json
 {
@@ -340,9 +336,9 @@ User prompt (~250-400 tokens) is a JSON envelope around the catalog:
   "class_name": "LoginPage",
   "fixture_name": "login_page",
   "elements": [
-    {"id": "email", "kind": "input", "name": "Email"},
-    {"id": "password", "kind": "input", "name": "Password"},
-    {"id": "submit", "kind": "button", "name": "Sign in"}
+    {"id": "email",    "kind": "input",  "name": "Email"},
+    {"id": "password", "kind": "input",  "name": "Password"},
+    {"id": "submit",   "kind": "button", "name": "Sign in"}
   ],
   "forms": [
     {"id": "form_1", "fields": ["email", "password"], "submit_id": "submit"}
@@ -350,14 +346,9 @@ User prompt (~250-400 tokens) is a JSON envelope around the catalog:
 }
 ```
 
-Output is typically ~120 tokens.
+Output: ~120 tokens.
 
-### Feature plan (stage 6)
-
-System prompt (~150 tokens) defines the schema for Gherkin features
-and constrains scenario tiers + step counts.
-
-User prompt (~250-350 tokens) is again a JSON envelope:
+Example envelope for `build_feature_prompt`:
 
 ```json
 {
@@ -366,11 +357,36 @@ User prompt (~250-350 tokens) is again a JSON envelope:
   "headings": ["Sign in"],
   "pom_methods": ["fill_email", "fill_password", "click_submit"],
   "elements": [...],
-  "tiers": ["smoke", "happy", "validation"]
+  "tiers": ["smoke", "happy", "validation"],
+  "ui_inventory": {"forms": 1, "buttons": ["submit"], "nav": [...], ...},
+  "known_pages": [
+    {"slug": "home", "url": "...", "pom_class": "HomePage",
+     "fixture": "home_page", "navigate_method": "navigate"}
+  ]
 }
 ```
 
-Output is typically ~180 tokens.
+Output: ~180 tokens.
+
+Example envelope for `build_steps_prompt` (new):
+
+```json
+{
+  "page_url": "...",
+  "pom_class": "LoginPage",
+  "pom_fixture": "login_page",
+  "pom_methods": [{"name": "fill_email", "element_id": "email", ...}, ...],
+  "elements": [...],
+  "known_pages": [...],
+  "feature_plan": {
+    "background": [...],
+    "scenarios": [{"title": "...", "tier": "smoke", "steps": [...]}, ...]
+  }
+}
+```
+
+Output: ~300 tokens — one `{step_text, body, intent}` entry per
+unique Gherkin step.
 
 ## Validation
 

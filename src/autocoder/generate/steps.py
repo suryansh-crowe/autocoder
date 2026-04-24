@@ -31,8 +31,11 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict
+from typing import Iterable
+from urllib.parse import urlparse
 
-from autocoder.models import Element, FeaturePlan, POMPlan, StepRef
+from autocoder import logger
+from autocoder.models import Element, FeaturePlan, POMPlan, StepRef, StepsPlan
 
 
 _HEADER = '''"""Generated step definitions for {feature_title!r}."""
@@ -318,6 +321,339 @@ def _try_synthesize(
     return None
 
 
+# ---------------------------------------------------------------------------
+# Post-generation validator
+#
+# Applied to every final body (LLM or synthesized) before it's written
+# to the step file. Catches three classes of bug the prompts forbid
+# but models still occasionally ship:
+#
+#   1. absolute URL literals in to_have_url — environment-frozen and
+#      will break against dev / staging / prod. REPAIR in place.
+#   2. a Then step whose assertion targets the same element id a
+#      prior When/And step already acted on — violates
+#      CONSEQUENCE-NOT-TARGET. REJECT to NotImplementedError so heal
+#      can rewrite it.
+#   3. a pom_method whose name shares no meaningful token with the
+#      step text (the "Filter button → search_assets" mis-bind).
+#      REJECT to NotImplementedError.
+# ---------------------------------------------------------------------------
+
+
+_URL_LITERAL_RE = re.compile(
+    r"""to_have_url\(\s*(['"])(https?://[^'"]+)\1\s*\)"""
+)
+
+
+_METHOD_CALL_RE = re.compile(
+    r"^\s*[a-zA-Z_][a-zA-Z0-9_]*\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\("
+)
+
+
+_LOCATE_ANY_ID_RE = re.compile(
+    r"\.locate\(\s*(['\"])([^'\"]+)\1\s*\)"
+)
+
+
+# Visibility-shaped Then assertions. Used by rule 4
+# (PREEXISTING-ELEMENT ASSERTION) to detect `expect(...).to_be_visible()`
+# on an element that was already on the page at load.
+_VISIBILITY_ASSERT_RE = re.compile(
+    r"""expect\([^)]*\.locate\(\s*(['"])([^'"]+)\1\s*\)[^)]*\)"""
+    r"\.to_be_visible\(\s*\)"
+)
+
+
+# Text-shaped Then assertions. Used by the weak-text-fallback rule
+# to detect ``expect(page.get_by_text('Filter')).to_be_visible()`` and
+# ``expect(page.get_by_role('heading', name='Filter')).to_be_visible()``
+# patterns where the literal happens to match an element name that was
+# already on the page at load (so the assertion passes trivially).
+_GET_BY_TEXT_RE = re.compile(
+    r"""get_by_text\(\s*(['"])([^'"]+)\1"""
+)
+
+_GET_BY_ROLE_NAME_RE = re.compile(
+    r"""get_by_role\([^)]*\bname\s*=\s*(['"])([^'"]+)\1"""
+)
+
+
+# ``POMMethod.action`` values that count as state-changing. ``fill`` is
+# deliberately NOT state-changing: filling a field proves nothing
+# observable until a separate submit trigger fires the form.
+_STATE_CHANGING_ACTIONS = frozenset({"click", "check", "select", "navigate"})
+
+
+def nav_method_names(
+    method_pairs: "Iterable[tuple[str, str | None]]",
+    known_pages: list[dict] | None,
+) -> set[str]:
+    """POM method names that click/navigate toward a ``known_pages`` sibling.
+
+    ``method_pairs`` is an iterable of ``(method_name, element_id)``.
+    Using tuples instead of POMMethod/POMPlan lets ``prompts.py`` call
+    this helper with the serialized dict form it already carries.
+
+    A method counts as cross-page navigation when its name starts with
+    ``click_`` or ``navigate`` AND either the method name or its
+    element id contains one of the known_pages slugs as a substring
+    (covers ``click_home`` → slug ``home`` and ``click_data_catalog``
+    → slug ``catalog``).
+
+    Two callers rely on this set:
+
+    * :func:`_scenario_level_rejections` — decides whether a Then
+      step is "preceded by a cross-page navigation", the only
+      context in which asserting a preload-visible element still
+      proves something.
+    * :func:`autocoder.llm.prompts.build_steps_prompt` — surfaces
+      the set to the step-binder LLM so it can self-avoid the
+      PREEXISTING-ELEMENT ASSERTION ban at authoring time.
+    """
+    if not known_pages:
+        return set()
+    slugs = {(kp.get("slug") or "").lower() for kp in known_pages}
+    slugs.discard("")
+    if not slugs:
+        return set()
+    out: set[str] = set()
+    for name, element_id in method_pairs:
+        lname = (name or "").lower()
+        if not lname.startswith("click_") and not lname.startswith("navigate"):
+            continue
+        eid = (element_id or "").lower()
+        for slug in slugs:
+            if slug in lname or slug in eid:
+                out.add(name)
+                break
+    return out
+
+
+def _nav_method_names(pom_plan: POMPlan, known_pages: list[dict] | None) -> set[str]:
+    """POMPlan-shaped wrapper around :func:`nav_method_names`."""
+    return nav_method_names(
+        ((m.name, m.element_id) for m in pom_plan.methods),
+        known_pages,
+    )
+
+
+def _scenario_level_rejections(
+    feature_plan: FeaturePlan,
+    method_action: dict[str, str],
+    nav_method_names: set[str],
+) -> tuple[set[str], set[str], set[str]]:
+    """Per-step-text rejection sets for scenario-level validator rules.
+
+    Returns ``(zero_action_then_texts, duplicate_step_texts,
+    then_texts_without_nav_predecessor)``.
+
+    A step text appears in the returned set only if **every** scenario
+    in which it occurs triggers the rejection — this protects a step
+    that is legitimate in one scenario but broken in another (step
+    functions are shared across scenarios, so rejecting the body
+    there would break the legitimate usage too).
+
+    Duplicate-step rejection is the single exception: if a scenario
+    contains two adjacent When/And steps with identical pom_method +
+    args, the text of the SECOND occurrence is flagged regardless —
+    the second call is guaranteed to be a no-op, so there is no
+    "legitimate" usage to preserve.
+    """
+    per_step_zero_action: dict[str, list[bool]] = {}
+    per_step_no_nav: dict[str, list[bool]] = {}
+    duplicate_step_texts: set[str] = set()
+
+    for scn in feature_plan.scenarios:
+        resolved = _resolve_keywords(list(scn.steps))
+        has_state_change = False
+        saw_cross_page_nav = False
+        prev_sig: tuple | None = None
+        for s in resolved:
+            is_state_change = False
+            if s.pom_method:
+                action = method_action.get(s.pom_method, "")
+                if action in _STATE_CHANGING_ACTIONS:
+                    is_state_change = True
+                elif s.pom_method in nav_method_names:
+                    is_state_change = True
+            if is_state_change:
+                has_state_change = True
+            if s.pom_method and s.pom_method in nav_method_names:
+                saw_cross_page_nav = True
+
+            sig: tuple | None = None
+            if s.keyword in ("When", "And") and s.pom_method is not None:
+                sig = (s.pom_method, tuple(s.args or []))
+                if prev_sig is not None and sig == prev_sig:
+                    duplicate_step_texts.add(s.text or "")
+            prev_sig = sig
+
+            if s.keyword == "Then":
+                per_step_zero_action.setdefault(s.text or "", []).append(
+                    not has_state_change
+                )
+                per_step_no_nav.setdefault(s.text or "", []).append(
+                    not saw_cross_page_nav
+                )
+
+    zero_action_then_texts = {
+        t for t, flags in per_step_zero_action.items() if flags and all(flags)
+    }
+    then_texts_without_nav_predecessor = {
+        t for t, flags in per_step_no_nav.items() if flags and all(flags)
+    }
+    return zero_action_then_texts, duplicate_step_texts, then_texts_without_nav_predecessor
+
+
+# Methods whose names carry no content signal — exempt from the
+# method-token overlap check because they apply to any step text.
+_UNIVERSAL_POM_METHODS = {"navigate"}
+
+
+# Generic verbs / nouns that appear in most method names and most
+# step texts. Overlap via these alone isn't meaningful — if those
+# are the ONLY tokens shared, the method is probably mis-bound.
+_GENERIC_METHOD_TOKENS = {
+    "open", "close", "show", "hide", "get", "do", "go", "handle",
+    "click", "clicks", "fill", "fills", "check", "checks", "toggle",
+    "select", "selects", "submit", "submits", "enter", "enters",
+    "button", "buttons", "view", "manage",
+}
+
+
+def _repair_url_literal(body: str) -> str:
+    """Rewrite ``to_have_url('https://host/path')`` to a path regex.
+
+    ``expect(page).to_have_url(re.compile(r'/path(?:[/?#]|$)'))`` binds
+    to the destination's path only, so the assertion stays correct
+    across dev / staging / prod. The regex anchors on the path
+    prefix; trailing query/fragment is tolerated.
+    """
+    def _sub(match: re.Match) -> str:
+        url = match.group(2)
+        parsed = urlparse(url)
+        path = parsed.path or "/"
+        path_esc = re.escape(path)
+        return f"to_have_url(re.compile(r'{path_esc}(?:[/?#]|$)'))"
+    return _URL_LITERAL_RE.sub(_sub, body)
+
+
+def _binding_quality_reason(
+    body: str,
+    step: StepRef,
+    forbidden_ids: set[str],
+    pom_method_names: set[str],
+    *,
+    zero_action_then_texts: set[str] | None = None,
+    duplicate_step_texts: set[str] | None = None,
+    then_texts_without_nav_predecessor: set[str] | None = None,
+    preload_visible_ids: set[str] | None = None,
+    preload_visible_names: set[str] | None = None,
+) -> str | None:
+    """Return a one-word rejection reason, or ``None`` when the body is clean.
+
+    Never called on bodies that already start with
+    ``raise NotImplementedError`` — those are already queued for heal.
+
+    Scenario-level rules (``zero_action_then_texts``,
+    ``duplicate_step_texts``, ``then_texts_without_nav_predecessor``)
+    are pre-computed once per feature by
+    :func:`_scenario_level_rejections` and passed in — per-step
+    inspection of the body then consults the sets.
+    """
+    # CONSEQUENCE-NOT-TARGET: a Then step may not bind to any id a
+    # prior When/And step in the same scenario already acted on.
+    if step.keyword == "Then" and forbidden_ids:
+        for loc in _LOCATE_ANY_ID_RE.finditer(body):
+            if loc.group(2) in forbidden_ids:
+                return "consequence_not_target"
+
+    # DUPLICATE-ACTION: a When/And step whose (pom_method, args) is
+    # identical to the prior When/And step in its scenario. The
+    # second call is always a no-op.
+    if (
+        duplicate_step_texts
+        and step.keyword in ("When", "And")
+        and (step.text or "") in duplicate_step_texts
+    ):
+        return "duplicate_action"
+
+    # ZERO-ACTION SCENARIO: a Then step in a scenario whose Given→Then
+    # path contains no state-changing action (click/check/select/
+    # navigate). fill_* on its own is not state-changing — filling
+    # a field proves nothing until something triggers the form.
+    if (
+        zero_action_then_texts
+        and step.keyword == "Then"
+        and (step.text or "") in zero_action_then_texts
+    ):
+        return "zero_action_scenario"
+
+    # PREEXISTING-ELEMENT ASSERTION: a Then step whose body asserts
+    # `expect(...).to_be_visible()` on an element id that was already
+    # on the page at load (``preload_visible_ids``) AND whose scenario
+    # was not preceded by a cross-page navigation. The assertion
+    # would pass before any action ran, so it proves nothing.
+    if (
+        step.keyword == "Then"
+        and preload_visible_ids
+        and then_texts_without_nav_predecessor is not None
+        and (step.text or "") in then_texts_without_nav_predecessor
+    ):
+        for m in _VISIBILITY_ASSERT_RE.finditer(body):
+            if m.group(2) in preload_visible_ids:
+                return "preexisting_element_assertion"
+
+    # WEAK-TEXT-FALLBACK: a Then step whose body asserts visibility via
+    # ``get_by_text('<literal>')`` or ``get_by_role(..., name='<literal>')``
+    # where <literal> (case-insensitive) is a substring of a name that
+    # was already on the page at load. Example: the Filter button has
+    # name "Filter"; a Then body using ``get_by_text('Filter')`` would
+    # match that button and pass trivially. Only fires on Then steps
+    # that were NOT preceded by a cross-page navigation — on a fresh
+    # destination page, a heading name that happens to share text with
+    # the source page is still a real consequence of the nav.
+    if (
+        step.keyword == "Then"
+        and preload_visible_names
+        and then_texts_without_nav_predecessor is not None
+        and (step.text or "") in then_texts_without_nav_predecessor
+    ):
+        preload_names_lower = {n.lower() for n in preload_visible_names if n}
+        for pattern in (_GET_BY_TEXT_RE, _GET_BY_ROLE_NAME_RE):
+            for m in pattern.finditer(body):
+                literal = (m.group(2) or "").lower().strip()
+                if not literal:
+                    continue
+                # Substring match in either direction — "Filter"
+                # matches a name "Filter" AND "Filter Panel", and a
+                # literal "Stewie assistant" matches a name "Open
+                # Stewie assistant". Both directions are weak.
+                for pname in preload_names_lower:
+                    if literal in pname or pname in literal:
+                        return "weak_text_fallback"
+
+    # METHOD-STEP TOKEN MATCH: bound pom_method name must share >= 1
+    # meaningful token with the step text. Generic verb tokens
+    # (click/open/view/...) don't count — two step/method pairs that
+    # share only 'click' are still mis-bound.
+    m = _METHOD_CALL_RE.match(body)
+    if m:
+        method_name = m.group(1)
+        if (
+            method_name in pom_method_names
+            and method_name not in _UNIVERSAL_POM_METHODS
+        ):
+            step_tokens = set(_normalize(step.text or ""))
+            step_tokens -= _GENERIC_METHOD_TOKENS
+            method_tokens = set(method_name.lower().split("_"))
+            method_tokens -= _GENERIC_METHOD_TOKENS
+            if step_tokens and method_tokens and not (step_tokens & method_tokens):
+                return "method_token_mismatch"
+
+    return None
+
+
 def _body(
     step: StepRef,
     extracted_args: list[str],
@@ -326,7 +662,114 @@ def _body(
     elements: list[Element],
     *,
     forbidden_ids: set[str] | None = None,
+    steps_plan: StepsPlan | None = None,
+    pom_method_names: set[str] | None = None,
+    element_ids: set[str] | None = None,
+    zero_action_then_texts: set[str] | None = None,
+    duplicate_step_texts: set[str] | None = None,
+    then_texts_without_nav_predecessor: set[str] | None = None,
+    preload_visible_ids: set[str] | None = None,
+    preload_visible_names: set[str] | None = None,
 ) -> str:
+    """Produce a step body, then run repair + rejection passes."""
+    raw = _body_inner(
+        step,
+        extracted_args,
+        fixture_name,
+        pom_args_by_method,
+        elements,
+        forbidden_ids=forbidden_ids,
+        steps_plan=steps_plan,
+        pom_method_names=pom_method_names,
+        element_ids=element_ids,
+    )
+
+    # Already a heal stub — don't second-guess it.
+    if raw.lstrip().startswith("raise NotImplementedError"):
+        return raw
+
+    # REPAIR pass: rewrite absolute URL literals to path regexes.
+    repaired = _repair_url_literal(raw)
+
+    # REJECT pass: hard-rule violations downgrade to a NotImplementedError
+    # stub so the heal stage gets a chance to rewrite the body instead
+    # of shipping a silently-wrong assertion.
+    reason = _binding_quality_reason(
+        repaired,
+        step,
+        forbidden_ids or set(),
+        pom_method_names or set(pom_args_by_method.keys()),
+        zero_action_then_texts=zero_action_then_texts,
+        duplicate_step_texts=duplicate_step_texts,
+        then_texts_without_nav_predecessor=then_texts_without_nav_predecessor,
+        preload_visible_ids=preload_visible_ids,
+        preload_visible_names=preload_visible_names,
+    )
+    if reason:
+        # The rejection reason is diagnostic metadata, not part of the
+        # step's user-facing identity. Embedding it into the
+        # NotImplementedError body string would leak internal validator
+        # vocabulary into the heal prompt's context (heal reads the
+        # body on the file-failure path), and in the worst case lets
+        # the heal LLM pick up phrases like "zero_action_scenario" as
+        # literal assertion text. Log the reason separately and keep
+        # the body's string a clean ``Implement step: <verbatim>``.
+        logger.info(
+            "validator_rejected_binding",
+            step_text=step.text,
+            reason=reason,
+            keyword=step.keyword,
+        )
+        return (
+            f'raise NotImplementedError('
+            f'"Implement step: {step.text}")'
+        )
+    return repaired
+
+
+def _body_inner(
+    step: StepRef,
+    extracted_args: list[str],
+    fixture_name: str,
+    pom_args_by_method: dict[str, list[str]],
+    elements: list[Element],
+    *,
+    forbidden_ids: set[str] | None = None,
+    steps_plan: StepsPlan | None = None,
+    pom_method_names: set[str] | None = None,
+    element_ids: set[str] | None = None,
+) -> str:
+    # Prompt 3 (steps plan): if the LLM produced a body for this step
+    # text, prefer it — but only after the same AST-level validator
+    # that heal uses confirms the statement is safe. Invalid bodies
+    # fall through to the deterministic synthesizer below, which in
+    # turn falls through to `NotImplementedError` so the heal stage
+    # can replace them on the first pytest failure.
+    if steps_plan is not None:
+        raw = steps_plan.body_for(step.text or "")
+        if raw:
+            # Local import avoids a circular import at module load.
+            from autocoder.heal.validator import validate_body
+
+            cleaned, errs = validate_body(
+                raw,
+                fixture_name=fixture_name,
+                pom_method_names=pom_method_names or set(pom_args_by_method.keys()),
+                element_ids=element_ids,
+                max_statements=1,
+            )
+            # A bare `pass` on a Then step means the LLM couldn't find a
+            # safe binding — but the heal scanner only picks up
+            # `NotImplementedError`, so accepting `pass` would leave the
+            # assertion silently green forever. Discard it and fall
+            # through to the NotImplementedError emitter below.
+            if (
+                not errs
+                and cleaned
+                and not (step.keyword == "Then" and cleaned.strip() == "pass")
+            ):
+                return cleaned
+
     # Background / navigation hygiene: ``Given I am on the X page`` is
     # almost always a setup step that should actually load the page,
     # not click a nav link the LLM happened to map it to. The
@@ -376,6 +819,8 @@ def render_steps(
     pom_plan: POMPlan,
     pom_module: str,
     elements: list[Element] | None = None,
+    steps_plan: StepsPlan | None = None,
+    known_pages: list[dict] | None = None,
 ) -> str:
     """Emit a step-definitions module covering every step in the plan.
 
@@ -383,12 +828,51 @@ def render_steps(
     renderer can synthesize executable step bodies for common
     assertion/navigation patterns instead of emitting
     ``NotImplementedError``.
+
+    ``steps_plan`` is the optional prompt-3 output. When present, the
+    renderer uses each binding's body (after AST validation) before
+    falling back to heuristic synthesis — so every step has an
+    LLM-written Playwright body unless it fails validation, in which
+    case the deterministic path keeps the file runnable.
+
+    ``known_pages`` is the sibling-page snapshot (same shape the
+    feature-plan prompt receives). When provided, the scenario-level
+    validator uses it to decide which pom_methods count as cross-page
+    navigation — that matters for the PREEXISTING-ELEMENT ASSERTION
+    rule, which only fires when a Then step lacks a cross-page
+    predecessor.
     """
     fixture_name = pom_plan.fixture_name
     class_name = pom_plan.class_name
     pom_args_by_method = {m.name: list(m.args or []) for m in pom_plan.methods}
     method_to_element = {m.name: m.element_id for m in pom_plan.methods if m.element_id}
+    method_action = {m.name: m.action for m in pom_plan.methods}
     el_list: list[Element] = list(elements or [])
+    pom_method_names = set(pom_args_by_method.keys())
+    element_ids = {e.id for e in el_list}
+    preload_visible_ids = {e.id for e in el_list if e.visible}
+    # Names of preload-visible elements, used by the weak-text-fallback
+    # rule to reject ``get_by_text('<literal>')`` bindings whose literal
+    # is a substring of a pre-existing UI element's name (e.g. the
+    # Filter button's name is "Filter", so ``get_by_text('Filter')``
+    # would match that button and pass trivially).
+    #
+    # Filter out names shorter than 3 characters: a 1-2 char name
+    # (pagination button "2", icon "X") is too short to be a reliable
+    # substring indicator. Without this filter, legit assertions like
+    # ``get_by_text('Page 2')`` get over-rejected because "2" appears
+    # as a substring of "page 2".
+    preload_visible_names = {
+        (e.name or "").strip()
+        for e in el_list
+        if e.visible and (e.name or "").strip() and len((e.name or "").strip()) >= 3
+    }
+    nav_method_names = _nav_method_names(pom_plan, known_pages)
+    (
+        zero_action_then_texts,
+        duplicate_step_texts,
+        then_texts_without_nav_predecessor,
+    ) = _scenario_level_rejections(feature_plan, method_action, nav_method_names)
 
     parts: list[str] = [
         _HEADER.format(
@@ -455,6 +939,14 @@ def render_steps(
             pom_args_by_method,
             el_list,
             forbidden_ids=forbidden_by_text.get(text),
+            steps_plan=steps_plan,
+            pom_method_names=pom_method_names,
+            element_ids=element_ids,
+            zero_action_then_texts=zero_action_then_texts,
+            duplicate_step_texts=duplicate_step_texts,
+            then_texts_without_nav_predecessor=then_texts_without_nav_predecessor,
+            preload_visible_ids=preload_visible_ids,
+            preload_visible_names=preload_visible_names,
         )
         extra_params = "".join(f", {a}: str" for a in extracted_args)
 

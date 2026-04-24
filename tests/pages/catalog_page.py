@@ -10,12 +10,17 @@ from __future__ import annotations
 
 from playwright.sync_api import Page, expect
 
+from tests import settings
 from tests.pages.base_page import BasePage
 from tests.support.locator_strategy import SelectorSpec
 
 
 class CatalogPage(BasePage):
-    URL = "https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/catalog"
+    # Path component only — the absolute URL is built at runtime from
+    # ``settings.BASE_URL`` so the same POM targets dev / staging / prod
+    # without regeneration. The extraction URL captured at generation
+    # time was: https://aps-aitl-frontend-bja4eebjg6cyguea.northcentralus-01.azurewebsites.net/catalog
+    PATH = "/catalog"
     SELECTORS: dict[str, list[SelectorSpec]] = {
         'home': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Home'}, {'strategy': 'label', 'value': 'Home', 'role': 'button', 'name': 'Home'}, {'strategy': 'text', 'value': 'Home', 'role': 'button'}],
         'ask_stewie': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Ask Stewie'}, {'strategy': 'label', 'value': 'Ask Stewie', 'role': 'button', 'name': 'Ask Stewie'}, {'strategy': 'text', 'value': 'Ask Stewie', 'role': 'button'}],
@@ -35,13 +40,33 @@ class CatalogPage(BasePage):
         'previous': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Previous'}, {'strategy': 'text', 'value': 'Previous', 'role': 'button'}],
         '_1': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': '1'}, {'strategy': 'text', 'value': '1', 'role': 'button'}],
         '_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': '2'}, {'strategy': 'text', 'value': '2', 'role': 'button'}],
-        '_4': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': '4'}, {'strategy': 'text', 'value': '4', 'role': 'button'}],
+        '_192': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': '192'}, {'strategy': 'text', 'value': '192', 'role': 'button'}],
         'next': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Next'}, {'strategy': 'text', 'value': 'Next', 'role': 'button'}],
         'open_stewie_assistant': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Open Stewie assistant'}, {'strategy': 'label', 'value': 'Open Stewie assistant', 'role': 'button', 'name': 'Open Stewie assistant'}, {'strategy': 'text', 'value': 'Open Stewie assistant', 'role': 'button'}],
+        'heading_catalog': [{'strategy': 'role_name', 'value': 'heading', 'role': 'heading', 'name': 'Catalog'}, {'strategy': 'text', 'value': 'Catalog', 'role': 'heading'}],
+        'home_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Home'}, {'strategy': 'label', 'value': 'Home', 'role': 'button', 'name': 'Home'}, {'strategy': 'text', 'value': 'Home', 'role': 'button'}],
+        'notifications_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Notifications'}, {'strategy': 'label', 'value': 'Notifications', 'role': 'button', 'name': 'Notifications'}, {'strategy': 'text', 'value': 'Notifications', 'role': 'button'}],
+        'logout_2': [{'strategy': 'role_name', 'value': 'button', 'role': 'button', 'name': 'Logout'}, {'strategy': 'label', 'value': 'Logout', 'role': 'button', 'name': 'Logout'}, {'strategy': 'text', 'value': 'Logout', 'role': 'button'}],
     }
 
     def __init__(self, page: Page) -> None:
         super().__init__(page, self.SELECTORS)
+
+    @property
+    def URL(self) -> str:
+        """Absolute URL for this page, joined against ``settings.BASE_URL``.
+
+        Raises if ``BASE_URL`` is empty so a missing ``.env`` entry
+        fails loudly instead of silently hitting ``about:blank`` or
+        whatever Playwright does with a bare path.
+        """
+        base = (settings.BASE_URL or "").rstrip("/")
+        if not base:
+            raise RuntimeError(
+                "BASE_URL is not set in .env — add it so tests target "
+                "your environment (dev / staging / prod)."
+            )
+        return base + self.PATH
 
     def navigate(self) -> None:
         # ``domcontentloaded`` matches the extraction-time wait ladder
@@ -50,81 +75,105 @@ class CatalogPage(BasePage):
         self.page.goto(self.URL, wait_until="domcontentloaded")
 
     def click_home(self) -> None:
-        """Navigate to Home section"""
+        """navigate to home dashboard"""
         self.click('home')
 
     def click_ask_stewie(self) -> None:
-        """Open Ask Stewie dialog"""
+        """open Stewie AI assistant"""
         self.click('ask_stewie')
 
     def click_data_catalog(self) -> None:
-        """Go to Data Catalog"""
+        """view data catalog"""
         self.click('data_catalog')
 
     def click_source_connection(self) -> None:
-        """Open Source Connection"""
+        """manage source connections"""
         self.click('source_connection')
 
     def click_data_quality(self) -> None:
-        """Go to Data Quality section"""
+        """view data quality dashboard"""
         self.click('data_quality')
 
     def click_agent_pipelines(self) -> None:
-        """Open Agent Pipelines"""
+        """manage agent pipelines"""
         self.click('agent_pipelines')
 
     def click_agent_management(self) -> None:
-        """Go to Agent Management"""
+        """manage agents"""
         self.click('agent_management')
 
     def click_security(self) -> None:
-        """Open Security section"""
+        """access security settings"""
         self.click('security')
 
     def click_notifications(self) -> None:
-        """Open Notifications panel"""
+        """view notifications"""
         self.click('notifications')
 
     def click_logout(self) -> None:
-        """Log out of application"""
+        """logout of Stewie AI"""
         self.click('logout')
 
     def click_close_sidebar(self) -> None:
-        """Close the sidebar"""
+        """close sidebar navigation"""
         self.click('close_sidebar')
 
+    def click_data_catalog_secondary(self) -> None:
+        """view data catalog (secondary)"""
+        self.click('data_catalog_2')
+
     def click_glossary(self) -> None:
-        """Open Glossary section"""
+        """open glossary"""
         self.click('glossary')
 
     def fill_search_assets(self, value: str) -> None:
-        """Enter search term for assets"""
+        """fill search assets textbox"""
         self.fill('search_assets', value)
 
+    def submit_search_assets(self) -> None:
+        """submit asset search via Enter key"""
+        self.locate('search_assets').press('Enter')
+
     def click_filter(self) -> None:
-        """Open filter options"""
+        """apply filter to results"""
         self.click('filter')
 
-    def click_previous(self) -> None:
-        """Go to previous page"""
+    def click_previous_page(self) -> None:
+        """go to previous results page"""
         self.click('previous')
 
     def click_page_1(self) -> None:
-        """Go to page 1"""
+        """go to page 1 of results"""
         self.click('_1')
 
     def click_page_2(self) -> None:
-        """Go to page 2"""
+        """go to page 2 of results"""
         self.click('_2')
 
-    def click_page_4(self) -> None:
-        """Go to page 4"""
-        self.click('_4')
+    def click_page_192(self) -> None:
+        """go to page 192 of results"""
+        self.click('_192')
 
-    def click_next(self) -> None:
-        """Go to next page"""
+    def click_next_page(self) -> None:
+        """go to next results page"""
         self.click('next')
 
     def click_open_stewie_assistant(self) -> None:
-        """Open Stewie assistant"""
+        """open Stewie assistant chat"""
         self.click('open_stewie_assistant')
+
+    def click_home_secondary(self) -> None:
+        """navigate to home dashboard (secondary)"""
+        self.click('home_2')
+
+    def click_notifications_secondary(self) -> None:
+        """view notifications (secondary)"""
+        self.click('notifications_2')
+
+    def click_logout_secondary(self) -> None:
+        """logout of Stewie AI (secondary)"""
+        self.click('logout_2')
+
+    def expect_heading_catalog(self) -> None:
+        """assert Catalog heading is visible"""
+        expect(self.locate('heading_catalog')).to_be_visible()
